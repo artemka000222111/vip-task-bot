@@ -28,10 +28,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📋 Доступные задания")],
             [KeyboardButton(text="➕ Создать задание")],
-            [
-                KeyboardButton(text="💰 Баланс"),
-                KeyboardButton(text="👤 Профиль"),
-            ],
+            [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
             [KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
@@ -147,16 +144,26 @@ async def profile(message: Message) -> None:
             message.from_user.id,
         )
 
-    if row is None:
-        await register_user(message)
-        row = await connection.fetchrow(
-            """
-            SELECT telegram_id, username, first_name, created_at
-            FROM users
-            WHERE telegram_id = $1
-            """,
-            message.from_user.id,
-        )
+        if row is None:
+            user = message.from_user
+            await connection.execute(
+                """
+                INSERT INTO users (telegram_id, username, first_name)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (telegram_id) DO NOTHING
+                """,
+                user.id,
+                user.username,
+                user.first_name or "",
+            )
+            row = await connection.fetchrow(
+                """
+                SELECT telegram_id, username, first_name, created_at
+                FROM users
+                WHERE telegram_id = $1
+                """,
+                user.id,
+            )
 
     username = f"@{row['username']}" if row["username"] else "не указан"
     joined = row["created_at"].strftime("%d.%m.%Y")
