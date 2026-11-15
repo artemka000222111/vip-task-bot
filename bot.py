@@ -638,15 +638,15 @@ async def task_history(message: Message) -> None:
         created = row["created_at"].strftime("%d.%m.%Y %H:%M")
         status = status_names.get(row["status"], row["status"])
         lines.append(
-            f"\\nЗаказ #{row['id']} — {status}\\n"
-            f"Дата: {created}\\n"
-            f"Стоимость: {row['total_cost']:.2f} ₽\\n"
+            f"\nЗаказ #{row['id']} — {status}\n"
+            f"Дата: {created}\n"
+            f"Стоимость: {row['total_cost']:.2f} ₽\n"
             f"Описание: {row['description'][:350]}"
         )
         if row["admin_reason"]:
             lines.append(f"Комментарий модератора: {row['admin_reason'][:500]}")
 
-    await message.answer("\\n\\n".join(lines), reply_markup=main_keyboard())
+    await message.answer("\n\n".join(lines), reply_markup=main_keyboard())
 
 
 @dp.message(F.text == "ℹ️ Помощь")
