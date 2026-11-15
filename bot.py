@@ -34,20 +34,11 @@ logging.basicConfig(
 dp = Dispatcher(storage=MemoryStorage())
 db_pool: asyncpg.Pool | None = None
 
-# Only supported, legitimate work categories are offered in the creation flow.
-TASK_CATEGORIES = [
-    "Тестирование сайта или приложения с письменным отчётом",
-    "Создание оригинального текста или другого контента",
-    "Расшифровка аудио или видео",
-    "Ручной сбор общедоступной информации",
-    "Ввод или проверка данных",
-]
 CANCEL_TEXT = "❌ Отменить"
 SKIP_TEXT = "Пропустить"
 
 
 class CreateTask(StatesGroup):
-    category = State()
     description = State()
     link = State()
     slots = State()
@@ -70,12 +61,6 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
     )
-
-
-def categories_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(text=item)] for item in TASK_CATEGORIES]
-    rows.append([KeyboardButton(text=CANCEL_TEXT)])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def cancel_keyboard() -> ReplyKeyboardMarkup:
@@ -194,14 +179,13 @@ async def send_task_to_admin(bot: Bot, task_id: int, task: dict) -> None:
         ADMIN_ID,
         (
             f"🆕 Заказ #{task_id} — новая заявка на модерацию\n\n"
-            f"Категория: {task['category']}\n"
             f"Описание: {task['description']}\n"
             f"Ссылка: {link_text}\n"
             f"Исполнителей: {task['slots']}\n"
             f"Оплата одному: {task['reward']:.2f} ₽\n"
             f"Общая стоимость: {task['total_cost']:.2f} ₽\n"
             f"Заказчик Telegram ID: {task['creator_id']}\n\n"
-            "Проверьте, что работа соответствует выбранной категории и не предполагает "
+            "Проверьте, что заказ описывает реальную услугу и не предполагает "
             "обмана, фиктивных отзывов или искусственного изменения показателей."
         ),
         reply_markup=keyboard,
@@ -239,7 +223,7 @@ async def available_tasks(message: Message) -> None:
     async with db_pool.acquire() as connection:
         rows = await connection.fetch(
             """
-            SELECT id, category, description, slots, reward
+            SELECT id, description, slots, reward
             FROM tasks
             WHERE status = 'approved'
             ORDER BY created_at DESC
@@ -255,7 +239,6 @@ async def available_tasks(message: Message) -> None:
     for row in rows:
         lines.append(
             f"\nЗаказ #{row['id']}\n"
-            f"Категория: {row['category']}\n"
             f"Описание: {row['description']}\n"
             f"Исполнителей требуется: {row['slots']}\n"
             f"Оплата: {row['reward']:.2f} ₽"
@@ -266,24 +249,11 @@ async def available_tasks(message: Message) -> None:
 @dp.message(F.text == "➕ Создать задание")
 async def create_task(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await state.set_state(CreateTask.category)
-    await message.answer(
-        "Выберите категорию реальной работы.\n"
-        "Пока доступны только перечисленные виды заданий:",
-        reply_markup=categories_keyboard(),
-    )
-
-
-@dp.message(CreateTask.category)
-async def task_category(message: Message, state: FSMContext) -> None:
-    if message.text not in TASK_CATEGORIES:
-        await message.answer("Пожалуйста, выберите категорию кнопкой ниже.")
-        return
-    await state.update_data(category=message.text)
     await state.set_state(CreateTask.description)
     await message.answer(
-        "Опишите задание подробно: что именно должен сделать исполнитель "
-        "и какой результат предоставить.",
+        "Опишите задание своими словами: что нужно сделать и какой результат "
+        "должен предоставить исполнитель. Размещайте только реальные услуги; "
+        "накрутка и фиктивные отзывы запрещены.",
         reply_markup=cancel_keyboard(),
     )
 
@@ -359,7 +329,6 @@ async def task_reward(message: Message, state: FSMContext) -> None:
     link_text = data.get("task_link") or "Не требуется"
     await message.answer(
         "📋 Проверьте заказ перед отправкой\n\n"
-        f"Категория: {data['category']}\n"
         f"Описание: {data['description']}\n"
         f"Ссылка: {link_text}\n"
         f"Исполнителей: {data['slots']}\n"
@@ -399,11 +368,10 @@ async def task_confirm(message: Message, state: FSMContext, bot: Bot) -> None:
             """
             INSERT INTO tasks
                 (creator_id, category, description, task_link, slots, reward, total_cost)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, 'Свободное описание', $2, $3, $4, $5, $6)
             RETURNING id
             """,
             message.from_user.id,
-            data["category"],
             data["description"],
             data.get("task_link"),
             data["slots"],
@@ -421,7 +389,6 @@ async def task_confirm(message: Message, state: FSMContext, bot: Bot) -> None:
     )
 
     task_for_admin = {
-        "category": data["category"],
         "description": data["description"],
         "task_link": data.get("task_link"),
         "slots": data["slots"],
@@ -639,14 +606,13 @@ async def profile(message: Message) -> None:
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_message(message: Message) -> None:
     await message.answer(
-        "VIP TASK — биржа реальных заданий.\n\n"
-        "Сейчас можно отправить заказ на модерацию в одной из категорий:\n"
-        "• Тестирование сайта или приложения с отчётом\n"
-        "• Создание оригинального контента\n"
-        "• Расшифровка аудио или видео\n"
-        "• Ручной сбор общедоступной информации\n"
-        "• Ввод или проверка данных\n\n"
-        "Каждый заказ проверяется администратором до одобрения."
+        "VIP TASK — биржа реальных услуг.\n\n"
+        "Опишите заказ своими словами: категории выбирать не нужно. "
+        "Можно размещать создание текстов, дизайн, монтаж, переводы, "
+        "расшифровку аудио, исследования, сбор информации, тестирование "
+        "сайтов и другие реальные услуги.\n\n"
+        "Запрещены накрутка показателей и фиктивные отзывы. "
+        "Каждый заказ проверяется администратором до публикации."
     )
 
 
