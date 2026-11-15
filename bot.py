@@ -56,6 +56,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📋 Доступные задания")],
             [KeyboardButton(text="➕ Создать задание")],
             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
+            [KeyboardButton(text="📚 История заказов")],
             [KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
@@ -601,6 +602,51 @@ async def profile(message: Message) -> None:
         f"ID: {row['telegram_id']}\n"
         f"Дата регистрации: {joined}"
     )
+
+
+@dp.message(F.text == "📚 История заказов")
+async def task_history(message: Message) -> None:
+    if message.from_user is None or db_pool is None:
+        await message.answer("Не удалось загрузить историю. Попробуйте позже.")
+        return
+
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT id, description, total_cost, status, admin_reason, created_at
+            FROM tasks
+            WHERE creator_id = $1
+            ORDER BY created_at DESC
+            LIMIT 10
+            """,
+            message.from_user.id,
+        )
+
+    if not rows:
+        await message.answer("📚 У вас пока нет заказов.", reply_markup=main_keyboard())
+        return
+
+    status_names = {
+        "pending_moderation": "⏳ На модерации",
+        "approved": "✅ Одобрен",
+        "rejected": "❌ Отклонён",
+        "revision": "📝 Требует доработки",
+    }
+
+    lines = ["📚 Последние 10 заказов:"]
+    for row in rows:
+        created = row["created_at"].strftime("%d.%m.%Y %H:%M")
+        status = status_names.get(row["status"], row["status"])
+        lines.append(
+            f"\\nЗаказ #{row['id']} — {status}\\n"
+            f"Дата: {created}\\n"
+            f"Стоимость: {row['total_cost']:.2f} ₽\\n"
+            f"Описание: {row['description'][:350]}"
+        )
+        if row["admin_reason"]:
+            lines.append(f"Комментарий модератора: {row['admin_reason'][:500]}")
+
+    await message.answer("\\n\\n".join(lines), reply_markup=main_keyboard())
 
 
 @dp.message(F.text == "ℹ️ Помощь")
