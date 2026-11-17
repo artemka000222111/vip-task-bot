@@ -320,11 +320,11 @@ async def get_partner_balance(user_id: int, conn=None) -> Decimal:
     return Decimal(value or 0)
 
 
-async def add_partner_commission(conn, buyer_id: int, purchase_amount: Decimal, ref: str, description: str):
+async def add_partner_commission(conn, buyer_id: int, purchase_amount: Decimal, ref: str, description: str, percent: Decimal = Decimal("10")):
     referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", buyer_id)
     if not referrer_id or referrer_id == buyer_id:
         return None
-    commission = (purchase_amount * Decimal("0.10")).quantize(Decimal("0.01"))
+    commission = (purchase_amount * percent / Decimal("100")).quantize(Decimal("0.01"))
     if commission <= 0:
         return None
     inserted = await conn.fetchval(
@@ -756,7 +756,7 @@ async def my_link(message: Message, bot: Bot):
         "🎁 Создавай красивые открытки.\n"
         "💸 Дарите друг другу настоящие деньги.\n"
         "🕵️ Узнавай, кто скрывается за анонимным сообщением.\n"
-        "💰 Приглашай друзей и получай 10% с их покупок!\n\n"
+        "💰 Приглашай друзей и получай до 10% с покупок и 5% с выводов!\n\n"
         "👇 Переходи по моей ссылке, чтобы отправить мне анонимное сообщение:\n\n"
         + link
     )
@@ -901,51 +901,69 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
 
 @dp.message(F.text == "💼 Мой заработок")
 async def partner_cabinet(message: Message, bot: Bot):
-    uid = message.from_user.id
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start=ref_{uid}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Аналитика", callback_data="partner:analytics")],
+        [InlineKeyboardButton(text="📖 Как это работает?", callback_data="partner:howto")],
+        [InlineKeyboardButton(text="📤 Вывести заработок", callback_data="partner:withdraw")],
+        [InlineKeyboardButton(text="📨 Поделиться ссылкой", callback_data="partner:share")],
+    ])
+    await message.answer(
+        "💼 МОЙ ЗАРАБОТОК\n\n"
+        "Приглашай друзей по своей ссылке и получай процент с их покупок и выводов.",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data == "partner:analytics")
+async def partner_analytics(callback: CallbackQuery):
+    uid = callback.from_user.id
     async with db_pool.acquire() as conn:
         balance = await get_partner_balance(uid, conn)
-        invited = await conn.fetchval("SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1", uid)
+        invited = await conn.fetchval(
+            "SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1", uid
+        )
         active = await conn.fetchval(
-            "SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1 AND last_active_at >= NOW()-INTERVAL '30 days'", uid
+            "SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1 "
+            "AND last_active_at >= NOW()-INTERVAL '30 days'", uid
         )
-        buyers = await conn.fetchval(
-            """SELECT COUNT(DISTINCT u.telegram_id) FROM nobody_users u
-               JOIN nobody_transactions t ON t.user_id=u.telegram_id
-               WHERE u.referred_by=$1 AND t.amount<0
-               AND (t.description='Покупка открытки-сердечка' OR t.description LIKE 'Раскрытие автора%')""", uid
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "📊 ТВОЯ АНАЛИТИКА\n\n"
+            f"👥 Всего рефералов: {invited}\n"
+            f"🟢 Активных за 30 дней: {active}\n"
+            f"💰 Всего заработано: {balance:.2f} ₽"
         )
-        purchase_sum = await conn.fetchval(
-            """SELECT COALESCE(-SUM(t.amount),0) FROM nobody_users u
-               JOIN nobody_transactions t ON t.user_id=u.telegram_id
-               WHERE u.referred_by=$1 AND t.amount<0
-               AND (t.description='Покупка открытки-сердечка' OR t.description LIKE 'Раскрытие автора%')""", uid
+
+
+@dp.callback_query(F.data == "partner:howto")
+async def partner_howto(callback: CallbackQuery):
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "📖 КАК ЭТО РАБОТАЕТ?\n\n"
+            "1. Нажми «Моя ссылка» и отправь её друзьям.\n"
+            "2. Когда друг зарегистрируется по ссылке, он станет твоим рефералом.\n"
+            "3. Получай процент с его операций:\n\n"
+            "💌 Покупка открытки — 10%\n"
+            "🔎 Раскрытие личности — 10%\n"
+            "💸 Одобренный вывод баланса — 5%\n\n"
+            "Начисления за покупки поступают сразу, за вывод — после одобрения заявки."
         )
-        history = await conn.fetch(
-            "SELECT amount,description FROM nobody_partner_ledger WHERE partner_id=$1 ORDER BY id DESC LIMIT 7", uid
+
+
+@dp.callback_query(F.data == "partner:share")
+async def partner_share(callback: CallbackQuery, bot: Bot):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "🔗 Твоя реферальная ссылка:\n" + link,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📨 Поделиться", url=f"https://t.me/share/url?url={link}")],
+            ])
         )
-    lines = [
-        "💼 МОЙ ЗАРАБОТОК", "",
-        f"Доступно к выводу: {balance:.2f} ₽",
-        f"Приглашено: {invited}",
-        f"Активных за 30 дней: {active}",
-        f"Покупали услуги: {buyers}",
-        f"Сумма покупок приглашённых: {Decimal(purchase_sum or 0):.2f} ₽", "",
-        "🔗 Твоя партнёрская ссылка:", link, "",
-        "📜 Последние начисления:"
-    ]
-    if history:
-        for item in history:
-            amount = Decimal(item["amount"])
-            lines.append(f"{'+' if amount >= 0 else ''}{amount:.2f} ₽ — {item['description']}")
-    else:
-        lines.append("Пока начислений нет.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📤 Вывести заработок (от 100 ₽)", callback_data="partner:withdraw")],
-        [InlineKeyboardButton(text="📨 Поделиться ссылкой", url=f"https://t.me/share/url?url={link}")],
-    ])
-    await message.answer("\n".join(lines), reply_markup=kb)
 
 
 @dp.callback_query(F.data == "partner:withdraw")
