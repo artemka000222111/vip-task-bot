@@ -1541,8 +1541,11 @@ async def admin_view_user_messages(message: Message, state: FSMContext):
         rows = []
         if user:
             rows = await conn.fetch(
-                "SELECT category, body, created_at FROM nobody_messages "
-                "WHERE recipient_id=$1 ORDER BY created_at DESC, id DESC LIMIT 10",
+                "SELECT category, body, created_at FROM ("
+                "SELECT category, body, created_at, id AS sort_id FROM nobody_messages WHERE recipient_id=$1 "
+                "UNION ALL "
+                "SELECT 'gift' AS category, body, created_at, id AS sort_id FROM nobody_gifts WHERE recipient_id=$1"
+                ") AS received ORDER BY created_at DESC, sort_id DESC LIMIT 10",
                 user["telegram_id"]
             )
     if not user:
