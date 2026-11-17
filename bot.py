@@ -1980,12 +1980,29 @@ async def stats_earnings(callback: CallbackQuery):
             "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions "
             "WHERE amount < 0 AND description <> 'Ручное списание администратором' AND created_at >= CURRENT_DATE"
         )
+        eligible_purchases = await conn.fetchval(
+            """SELECT COALESCE(-SUM(amount),0) FROM nobody_transactions
+               WHERE amount<0 AND (description='Покупка открытки-сердечка' OR description LIKE 'Раскрытие автора%')"""
+        )
+        purchase_partner_commissions = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE kind='commission'"
+        )
+        approved_withdrawal_fees = await conn.fetchval(
+            """SELECT COALESCE(SUM(amount*commission_percent/100),0)
+               FROM nobody_withdrawals WHERE status='approved'"""
+        )
+        project_earnings = (
+            Decimal(eligible_purchases or 0)
+            - Decimal(purchase_partner_commissions or 0)
+            + Decimal(approved_withdrawal_fees or 0)
+        )
     await callback.answer()
     if callback.message:
         await callback.message.answer(
             f"💰 ЗАРАБОТОК\n\n"
             f"Общий баланс людей: {Decimal(balance):.2f} ₽\n"
-            f"Всего потрачено: {Decimal(spent):.2f} ₽\n\n"
+            f"Всего потрачено: {Decimal(spent):.2f} ₽\n"
+            f"Доход проекта с открыток, раскрытий и выводов: {project_earnings:.2f} ₽\n\n"
             f"Пополнения за сегодня: {Decimal(topups_today):.2f} ₽\n"
             f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
         )
