@@ -52,6 +52,11 @@ class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
 
+class TopUpFlow(StatesGroup):
+    amount = State()
+    sender = State()
+    confirm = State()
+
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="📩 Входящие"), KeyboardButton(text="🔗 Моя ссылка")],
@@ -119,6 +124,17 @@ async def init_database() -> None:
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ref TEXT UNIQUE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_topups (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+                sender_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                reviewed_at TIMESTAMPTZ
             )
         """)
     log.info("VIP NOBODY database is ready")
@@ -203,7 +219,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
         await state.set_state(AnonymousFlow.category)
         await message.answer(
             "Выберите категорию анонимного сообщения.\n\n"
-            "Учти: твою личность могут раскрыть.",
+            "Учти, твою личность могут раскрыть.",
             reply_markup=category_keyboard())
         return
     await message.answer(
@@ -331,7 +347,146 @@ async def inbox(message: Message):
 @dp.message(F.text == "💰 Баланс")
 async def balance(message: Message):
     amount = await get_balance(message.from_user.id)
-    await message.answer(f"💰 Твой баланс: {amount:.2f} ₽\n\nПополнение будет подтверждаться администратором вручную.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")]
+    ])
+    await message.answer(f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=kb)
+
+@dp.callback_query(F.data == "topup:start")
+async def topup_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(TopUpFlow.amount)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("💳 Введи сумму пополнения в рублях:")
+
+@dp.message(TopUpFlow.amount)
+async def topup_amount(message: Message, state: FSMContext):
+    try:
+        amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
+        if amount <= 0 or amount > Decimal("1000000"):
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        await message.answer("Введи корректную сумму больше 0 ₽.")
+        return
+    await state.update_data(topup_amount=str(amount))
+    await state.set_state(TopUpFlow.sender)
+    await message.answer("Укажи имя и фамилию отправителя — как будет указано в переводе:")
+
+@dp.message(TopUpFlow.sender)
+async def topup_sender(message: Message, state: FSMContext):
+    sender_name = (message.text or "").strip()
+    if len(sender_name) < 2 or len(sender_name) > 80:
+        await message.answer("Укажи имя отправителя (от 2 до 80 символов).")
+        return
+    await state.update_data(sender_name=sender_name)
+    await state.set_state(TopUpFlow.confirm)
+    data = await state.get_data()
+    amount = Decimal(data["topup_amount"])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я отправил оплату", callback_data="topup:sent")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="topup:cancel")],
+    ])
+    await message.answer(
+        f"💳 Пополнение баланса\n\nСумма: {amount:.2f} ₽\nОтправитель: {sender_name}\n\n"
+        "Переведи указанную сумму по реквизитам:\n"
+        "🏦 Сбербанк\nНомер: +79607178182\n\n"
+        "После перевода нажми «Я отправил оплату». Баланс будет пополнен после проверки администратором.",
+        reply_markup=kb
+    )
+
+@dp.callback_query(F.data == "topup:cancel")
+async def topup_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer("Заявка отменена.")
+    if callback.message:
+        await callback.message.answer("Пополнение отменено.")
+
+@dp.callback_query(F.data == "topup:sent")
+async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if not data.get("topup_amount") or not data.get("sender_name"):
+        await callback.answer("Начни пополнение заново через раздел «Баланс».", show_alert=True)
+        return
+    amount = Decimal(data["topup_amount"])
+    user = callback.from_user
+    async with db_pool.acquire() as conn:
+        topup_id = await conn.fetchval("""
+            INSERT INTO nobody_topups (user_id, amount, sender_name)
+            VALUES ($1, $2, $3) RETURNING id
+        """, user.id, amount, data["sender_name"])
+    await state.clear()
+    await callback.answer("Заявка отправлена администратору!")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("✅ Заявка на пополнение отправлена. Баланс будет зачислен после проверки оплаты.")
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"topup:approve:{topup_id}"),
+         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"topup:reject:{topup_id}")]
+    ])
+    username = f"@{user.username}" if user.username else "не указан"
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"💳 НОВАЯ ЗАЯВКА НА ПОПОЛНЕНИЕ №{topup_id}\n\n"
+            f"Сумма: {amount:.2f} ₽\nОтправитель: {data['sender_name']}\n"
+            f"Пользователь: {user.full_name}\nUsername: {username}\nTelegram ID: {user.id}",
+            reply_markup=admin_kb
+        )
+    except Exception:
+        log.exception("Could not notify admin about top-up %s", topup_id)
+
+@dp.callback_query(F.data.startswith("topup:approve:"))
+async def topup_approve(callback: CallbackQuery, bot: Bot):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    topup_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT * FROM nobody_topups WHERE id=$1 FOR UPDATE", topup_id)
+            if not row or row["status"] != "pending":
+                await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
+                return
+            inserted = await conn.fetchval("""
+                INSERT INTO nobody_transactions (user_id, amount, kind, description, ref)
+                VALUES ($1, $2, 'credit', $3, $4)
+                ON CONFLICT (ref) DO NOTHING RETURNING id
+            """, row["user_id"], row["amount"], f"Пополнение по заявке №{topup_id}", f"topup:{topup_id}")
+            if inserted:
+                await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", row["user_id"], row["amount"])
+            await conn.execute("UPDATE nobody_topups SET status='approved', reviewed_at=NOW() WHERE id=$1", topup_id)
+    await callback.answer("Пополнение подтверждено.")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
+    try:
+        await bot.send_message(row["user_id"], f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.")
+    except Exception:
+        log.exception("Could not notify user about approved top-up %s", topup_id)
+
+@dp.callback_query(F.data.startswith("topup:reject:"))
+async def topup_reject(callback: CallbackQuery, bot: Bot):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    topup_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE nobody_topups SET status='rejected', reviewed_at=NOW()
+            WHERE id=$1 AND status='pending' RETURNING user_id, amount
+        """, topup_id)
+    if not row:
+        await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
+        return
+    await callback.answer("Заявка отклонена.")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(f"❌ Заявка №{topup_id} отклонена.")
+    try:
+        await bot.send_message(row["user_id"], f"❌ Заявка на пополнение №{topup_id} отклонена. Если считаешь это ошибкой, обратись в поддержку.")
+    except Exception:
+        log.exception("Could not notify user about rejected top-up %s", topup_id)
 
 @dp.message(F.text == "👤 Профиль")
 async def profile(message: Message):
