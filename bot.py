@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 
 import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
+from aiogram.exceptions import TelegramNetworkError, TelegramServerError
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -2273,10 +2274,33 @@ async def admin_balance_amount(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Операция выполнена. Новый баланс: {await get_balance(target):.2f} ₽")
 
+async def retry_telegram_request(make_request, bot, method):
+    # Temporary Telegram network failures should not immediately break user replies.
+    # Database operations are not retried here; only outgoing Telegram API calls.
+    if getattr(method, "__api_method__", "") == "getUpdates":
+        return await make_request(bot, method)
+
+    for attempt in range(3):
+        try:
+            return await make_request(bot, method)
+        except (TelegramNetworkError, TelegramServerError):
+            if attempt == 2:
+                raise
+            delay = attempt + 1
+            log.warning(
+                "Telegram API request %s failed; retrying in %s sec (attempt %s/3)",
+                getattr(method, "__api_method__", type(method).__name__),
+                delay,
+                attempt + 1,
+            )
+            await asyncio.sleep(delay)
+
+
 async def main():
     if not BOT_TOKEN: raise RuntimeError("Не задан BOT_TOKEN в переменных Railway.")
     await init_database()
     bot = Bot(token=BOT_TOKEN)
+    bot.session.middleware(retry_telegram_request)
     try:
         await dp.start_polling(bot)
     finally:
