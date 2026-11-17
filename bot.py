@@ -409,8 +409,12 @@ async def gift_amount(message: Message, state: FSMContext):
     except (InvalidOperation, ValueError):
         await message.answer("Сумма подарка должна быть от 10 до 5 000 ₽. Введи корректную сумму."); return
     if await get_balance(message.from_user.id) < amount:
-        await message.answer("Недостаточно средств для такого подарка.", reply_markup=insufficient_balance_keyboard())
-        await state.clear(); return
+        await state.update_data(resume_gift=True)
+        await message.answer(
+            "Недостаточно средств для такого подарка. Пополни баланс — после подтверждения оплаты вернём тебя к подарку, и ты сможешь снова указать сумму.",
+            reply_markup=insufficient_balance_keyboard()
+        )
+        return
     await state.update_data(gift_amount=str(amount))
     await state.set_state(GiftFlow.text)
     await message.answer("Напиши текст, который будет приложен к денежному подарку:")
@@ -812,7 +816,9 @@ async def withdraw_reject(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "topup:start")
 async def topup_start(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
+    saved = await state.get_data()
+    if not saved.get("resume_gift"):
+        await state.clear()
     await state.set_state(TopUpFlow.amount)
     await callback.answer()
     if callback.message:
@@ -906,7 +912,10 @@ async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
             VALUES ($1, $2, $3) RETURNING id
         """, user.id, amount, data["sender_name"])
     await clear_flow_message(bot, callback.from_user.id, state)
-    await state.clear()
+    if data.get("resume_gift"):
+        await state.set_state(None)
+    else:
+        await state.clear()
     await callback.answer("Заявка отправлена администратору!")
     if callback.message:
         await callback.message.answer("✅ Заявка на пополнение отправлена. Баланс будет зачислен после проверки оплаты.")
@@ -951,7 +960,18 @@ async def topup_approve(callback: CallbackQuery, bot: Bot):
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
     try:
-        await bot.send_message(row["user_id"], f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.")
+        user_state = await dp.fsm.get_context(bot=bot, chat_id=row["user_id"], user_id=row["user_id"])
+        saved = await user_state.get_data()
+        if saved.get("resume_gift"):
+            await user_state.update_data(resume_gift=False)
+            await user_state.set_state(GiftFlow.amount)
+            await bot.send_message(
+                row["user_id"],
+                f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.\n\n"
+                "Возвращаемся к денежному подарку 🎁\nУкажи сумму от 10 до 5 000 ₽:"
+            )
+        else:
+            await bot.send_message(row["user_id"], f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.")
     except Exception:
         log.exception("Could not notify user about approved top-up %s", topup_id)
 
