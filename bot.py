@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
@@ -17,9 +17,6 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
-from dotenv import load_dotenv
-
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -30,644 +27,306 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
+log = logging.getLogger("vip-nobody")
 
 dp = Dispatcher(storage=MemoryStorage())
 db_pool: asyncpg.Pool | None = None
 
-CANCEL_TEXT = "❌ Отменить"
-SKIP_TEXT = "Пропустить"
+CATEGORIES = {
+    "love": "❤️ Признание",
+    "compliment": "😍 Комплимент",
+    "question": "❓ Вопрос",
+    "joke": "😂 Прикол",
+    "other": "💬 Другое",
+}
 
 
-class CreateTask(StatesGroup):
-    description = State()
-    link = State()
-    slots = State()
-    reward = State()
-    confirm = State()
-
-
-class AdminDecision(StatesGroup):
-    reason = State()
+class AnonymousFlow(StatesGroup):
+    category = State()
+    text = State()
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📋 Доступные задания")],
-            [KeyboardButton(text="➕ Создать задание")],
+            [KeyboardButton(text="📩 Входящие"), KeyboardButton(text="🔗 Моя ссылка")],
             [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
-            [KeyboardButton(text="📚 История заказов")],
-            [KeyboardButton(text="ℹ️ Помощь")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="ℹ️ Помощь")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие",
     )
 
 
-def cancel_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=CANCEL_TEXT)]],
-        resize_keyboard=True,
-    )
-
-
-def skip_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=SKIP_TEXT)],
-            [KeyboardButton(text=CANCEL_TEXT)],
+def category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=CATEGORIES["love"], callback_data="category:love"),
+            InlineKeyboardButton(text=CATEGORIES["compliment"], callback_data="category:compliment"),
         ],
-        resize_keyboard=True,
-    )
-
-
-def confirm_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Отправить на модерацию")],
-            [KeyboardButton(text=CANCEL_TEXT)],
+        [
+            InlineKeyboardButton(text=CATEGORIES["question"], callback_data="category:question"),
+            InlineKeyboardButton(text=CATEGORIES["joke"], callback_data="category:joke"),
         ],
-        resize_keyboard=True,
-    )
+        [InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
+    ])
 
 
 async def init_database() -> None:
     global db_pool
-
     if not DATABASE_URL:
-        raise RuntimeError(
-            "Не задан DATABASE_URL. Добавьте ссылку на PostgreSQL в Variables Railway."
-        )
+        raise RuntimeError("Не задана переменная DATABASE_URL в Railway.")
 
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_users (
                 telegram_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT NOT NULL DEFAULT '',
-                balance NUMERIC(12, 2) NOT NULL DEFAULT 0,
+                last_name TEXT,
+                balance NUMERIC(12,2) NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
-            """
-        )
-        await connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_messages (
                 id BIGSERIAL PRIMARY KEY,
-                creator_id BIGINT NOT NULL REFERENCES users(telegram_id),
+                recipient_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                sender_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 category TEXT NOT NULL,
-                description TEXT NOT NULL,
-                task_link TEXT,
-                slots INTEGER NOT NULL CHECK (slots > 0),
-                reward NUMERIC(12, 2) NOT NULL CHECK (reward >= 1),
-                total_cost NUMERIC(14, 2) NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending_moderation',
-                admin_reason TEXT,
+                body TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                reviewed_at TIMESTAMPTZ
+                is_read BOOLEAN NOT NULL DEFAULT FALSE,
+                revealed BOOLEAN NOT NULL DEFAULT FALSE
             )
-            """
-        )
-
-    logging.info("PostgreSQL подключён, таблицы users и tasks проверены.")
-    if ADMIN_ID is None:
-        logging.warning("ADMIN_ID не задан. Заявки будут сохраняться, но уведомление админу не отправится.")
+        """)
+    log.info("VIP NOBODY database is ready")
 
 
-async def register_user(message: Message) -> None:
-    if message.from_user is None or db_pool is None:
+async def save_user(user) -> None:
+    if db_pool is None or user is None:
         return
-
-    user = message.from_user
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO users (telegram_id, username, first_name)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (telegram_id) DO UPDATE
-            SET username = EXCLUDED.username,
-                first_name = EXCLUDED.first_name
-            """,
-            user.id,
-            user.username,
-            user.first_name or "",
-        )
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO nobody_users (telegram_id, username, first_name, last_name)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name
+        """, user.id, user.username, user.first_name or "", user.last_name)
 
 
-async def send_task_to_admin(bot: Bot, task_id: int, task: dict) -> None:
-    if ADMIN_ID is None:
-        return
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Принять", callback_data=f"task:approve:{task_id}"),
-                InlineKeyboardButton(text="❌ Отказать", callback_data=f"task:reject:{task_id}"),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📝 На доработку",
-                    callback_data=f"task:revision:{task_id}",
-                )
-            ],
-        ]
-    )
-    link_text = task["task_link"] or "Не требуется"
-    await bot.send_message(
-        ADMIN_ID,
-        (
-            f"🆕 Заказ #{task_id} — новая заявка на модерацию\n\n"
-            f"Описание: {task['description']}\n"
-            f"Ссылка: {link_text}\n"
-            f"Исполнителей: {task['slots']}\n"
-            f"Оплата одному: {task['reward']:.2f} ₽\n"
-            f"Общая стоимость: {task['total_cost']:.2f} ₽\n"
-            f"Заказчик Telegram ID: {task['creator_id']}\n\n"
-            "Проверьте, что заказ описывает реальную услугу и не предполагает "
-            "обмана, фиктивных отзывов или искусственного изменения показателей."
-        ),
-        reply_markup=keyboard,
-    )
+async def get_bot_username(bot: Bot) -> str:
+    me = await bot.get_me()
+    return me.username or ""
 
 
 @dp.message(CommandStart())
-async def command_start(message: Message, state: FSMContext) -> None:
+async def start(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
-    await register_user(message)
-    await message.answer(
-        "Добро пожаловать в VIP TASK!\n\n"
-        "Здесь можно размещать допустимые задания и выполнять их.\n"
-        "Выберите нужный раздел в меню ниже.",
-        reply_markup=main_keyboard(),
-    )
-
-
-@dp.message(F.text == CANCEL_TEXT)
-async def cancel_any_flow(message: Message, state: FSMContext) -> None:
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Сейчас нечего отменять.", reply_markup=main_keyboard())
+    if message.from_user is None:
         return
-    await state.clear()
-    await message.answer("Действие отменено. Деньги не списывались.", reply_markup=main_keyboard())
+    await save_user(message.from_user)
 
+    payload = ""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2:
+        payload = parts[1].strip()
 
-@dp.message(F.text == "📋 Доступные задания")
-async def available_tasks(message: Message) -> None:
-    if db_pool is None:
-        await message.answer("База данных пока недоступна.")
-        return
-
-    async with db_pool.acquire() as connection:
-        rows = await connection.fetch(
-            """
-            SELECT id, description, slots, reward
-            FROM tasks
-            WHERE status = 'approved'
-            ORDER BY created_at DESC
-            LIMIT 10
-            """
-        )
-
-    if not rows:
-        await message.answer("Пока опубликованных заданий нет.")
-        return
-
-    lines = ["📋 Одобренные задания:"]
-    for row in rows:
-        lines.append(
-            f"\nЗаказ #{row['id']}\n"
-            f"Описание: {row['description']}\n"
-            f"Исполнителей требуется: {row['slots']}\n"
-            f"Оплата: {row['reward']:.2f} ₽"
-        )
-    await message.answer("\n".join(lines))
-
-
-@dp.message(F.text == "➕ Создать задание")
-async def create_task(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(CreateTask.description)
-    await message.answer(
-        "Опишите задание своими словами: что нужно сделать и какой результат "
-        "должен предоставить исполнитель. Размещайте только реальные услуги; "
-        "накрутка и фиктивные отзывы запрещены.",
-        reply_markup=cancel_keyboard(),
-    )
-
-
-@dp.message(CreateTask.description)
-async def task_description(message: Message, state: FSMContext) -> None:
-    description = (message.text or "").strip()
-    if len(description) < 10:
-        await message.answer("Описание слишком короткое. Напишите не менее 10 символов.")
-        return
-    if len(description) > 3000:
-        await message.answer("Описание слишком длинное. Максимум — 3000 символов.")
-        return
-    await state.update_data(description=description)
-    await state.set_state(CreateTask.link)
-    await message.answer(
-        "Отправьте ссылку, необходимую для выполнения задания, "
-        "или нажмите «Пропустить».",
-        reply_markup=skip_keyboard(),
-    )
-
-
-@dp.message(CreateTask.link)
-async def task_link(message: Message, state: FSMContext) -> None:
-    value = (message.text or "").strip()
-    if value == SKIP_TEXT:
-        link = None
-    else:
-        if len(value) > 1000 or not value.startswith(("https://", "http://")):
-            await message.answer("Отправьте полную ссылку, начинающуюся с https:// или http://, либо нажмите «Пропустить».")
+    if payload.startswith("to_"):
+        try:
+            recipient_id = int(payload[3:])
+        except ValueError:
+            recipient_id = 0
+        if recipient_id == message.from_user.id:
+            await message.answer("Нельзя отправить анонимное сообщение самому себе.")
             return
-        link = value
-    await state.update_data(task_link=link)
-    await state.set_state(CreateTask.slots)
-    await message.answer(
-        "Сколько исполнителей должно выполнить задание? Введите целое число от 1 до 10000.",
-        reply_markup=cancel_keyboard(),
-    )
-
-
-@dp.message(CreateTask.slots)
-async def task_slots(message: Message, state: FSMContext) -> None:
-    value = (message.text or "").strip()
-    if not value.isdigit() or not 1 <= int(value) <= 10000:
-        await message.answer("Введите целое число от 1 до 10000.")
-        return
-    await state.update_data(slots=int(value))
-    await state.set_state(CreateTask.reward)
-    await message.answer(
-        "Сколько рублей получит один исполнитель? Минимум — 1 ₽. "
-        "Можно указать копейки, например 12.50.",
-        reply_markup=cancel_keyboard(),
-    )
-
-
-@dp.message(CreateTask.reward)
-async def task_reward(message: Message, state: FSMContext) -> None:
-    try:
-        reward = Decimal((message.text or "").strip().replace(",", ".")).quantize(Decimal("0.01"))
-    except (InvalidOperation, ValueError):
-        await message.answer("Введите сумму числом, например 15 или 12.50.")
-        return
-
-    if not reward.is_finite() or reward < Decimal("1.00") or reward > Decimal("100000.00"):
-        await message.answer("Сумма должна быть от 1 ₽ до 100000 ₽ за одного исполнителя.")
-        return
-
-    data = await state.get_data()
-    total_cost = reward * data["slots"]
-    await state.update_data(reward=str(reward), total_cost=str(total_cost))
-    await state.set_state(CreateTask.confirm)
-
-    link_text = data.get("task_link") or "Не требуется"
-    await message.answer(
-        "📋 Проверьте заказ перед отправкой\n\n"
-        f"Описание: {data['description']}\n"
-        f"Ссылка: {link_text}\n"
-        f"Исполнителей: {data['slots']}\n"
-        f"Оплата одному: {reward:.2f} ₽\n"
-        f"Общая стоимость: {total_cost:.2f} ₽\n\n"
-        "После отправки заказ попадёт администратору на модерацию. "
-        "На этом этапе деньги не списываются.",
-        reply_markup=confirm_keyboard(),
-    )
-
-
-@dp.message(CreateTask.confirm)
-async def task_confirm(message: Message, state: FSMContext, bot: Bot) -> None:
-    if message.text != "✅ Отправить на модерацию":
-        await message.answer("Нажмите «✅ Отправить на модерацию» или отмените создание.")
-        return
-    if message.from_user is None or db_pool is None:
-        await message.answer("Не удалось сохранить заказ. Попробуйте позже.")
-        return
-
-    data = await state.get_data()
-    reward = Decimal(data["reward"])
-    total_cost = Decimal(data["total_cost"])
-
-    async with db_pool.acquire() as connection:
-        await connection.execute(
-            """
-            INSERT INTO users (telegram_id, username, first_name)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (telegram_id) DO NOTHING
-            """,
-            message.from_user.id,
-            message.from_user.username,
-            message.from_user.first_name or "",
+        if db_pool is None:
+            await message.answer("Сервис временно недоступен. Попробуйте позже.")
+            return
+        async with db_pool.acquire() as conn:
+            recipient = await conn.fetchrow(
+                "SELECT telegram_id FROM nobody_users WHERE telegram_id = $1",
+                recipient_id,
+            )
+        if recipient is None:
+            await message.answer("Не удалось найти получателя. Попросите его сначала запустить бота.")
+            return
+        await state.update_data(recipient_id=recipient_id)
+        await state.set_state(AnonymousFlow.category)
+        await message.answer(
+            "Вы отправляете анонимное сообщение. Сначала выберите категорию.\n\n"
+            "Важно: сервис хранит технические данные отправителя. Получатель сможет "
+            "раскрыть доступные данные профиля за 50 ₽. Не отправляйте то, что не готовы раскрыть.",
+            reply_markup=category_keyboard(),
         )
-        row = await connection.fetchrow(
-            """
-            INSERT INTO tasks
-                (creator_id, category, description, task_link, slots, reward, total_cost)
-            VALUES ($1, 'Свободное описание', $2, $3, $4, $5, $6)
-            RETURNING id
-            """,
-            message.from_user.id,
-            data["description"],
-            data.get("task_link"),
-            data["slots"],
-            reward,
-            total_cost,
-        )
+        return
 
-    task_id = row["id"]
-    await state.clear()
     await message.answer(
-        f"✅ Заказ #{task_id} отправлен на модерацию!\n\n"
-        "Администратор проверит его и пришлёт решение. "
-        "Деньги пока не списаны.",
+        "👋 Добро пожаловать в VIP NOBODY!\n\n"
+        "Здесь тебе могут отправлять анонимные сообщения. "
+        "Поделись своей ссылкой, чтобы получить первую анонимку.",
         reply_markup=main_keyboard(),
     )
 
-    task_for_admin = {
-        "description": data["description"],
-        "task_link": data.get("task_link"),
-        "slots": data["slots"],
-        "reward": reward,
-        "total_cost": total_cost,
-        "creator_id": message.from_user.id,
-    }
-    try:
-        await send_task_to_admin(bot, task_id, task_for_admin)
-    except Exception:
-        logging.exception("Не удалось отправить заказ админу: #%s", task_id)
-        await message.answer(
-            "Заявка сохранена, но уведомление администратору не отправилось. "
-            "Проверьте настройку ADMIN_ID в Railway."
-        )
 
-
-async def begin_admin_decision(
-    callback: CallbackQuery,
-    state: FSMContext,
-    task_id: int,
-    decision: str,
-) -> None:
-    if callback.from_user is None or ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
-        await callback.answer("Доступ запрещён.", show_alert=True)
+@dp.callback_query(F.data.startswith("category:"))
+async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
+    key = callback.data.split(":", 1)[1]
+    if key not in CATEGORIES:
+        await callback.answer("Неизвестная категория", show_alert=True)
         return
-    if db_pool is None:
-        await callback.answer("База данных недоступна.", show_alert=True)
-        return
-
-    async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
-            "SELECT id, status FROM tasks WHERE id = $1",
-            task_id,
-        )
-    if row is None or row["status"] != "pending_moderation":
-        await callback.answer("Эта заявка уже обработана или не найдена.", show_alert=True)
-        return
-
-    await state.set_state(AdminDecision.reason)
-    await state.update_data(task_id=task_id, decision=decision)
-    prompt = "Напишите причину отказа для заказчика:" if decision == "rejected" else "Напишите, что заказчику нужно исправить:"
+    await state.update_data(category=key)
+    await state.set_state(AnonymousFlow.text)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(f"Заказ #{task_id}. {prompt}")
-
-
-@dp.callback_query(F.data.startswith("task:approve:"))
-async def admin_approve(callback: CallbackQuery) -> None:
-    if callback.from_user is None or ADMIN_ID is None or callback.from_user.id != ADMIN_ID:
-        await callback.answer("Доступ запрещён.", show_alert=True)
-        return
-    task_id = int(callback.data.rsplit(":", 1)[1])
-    if db_pool is None:
-        await callback.answer("База данных недоступна.", show_alert=True)
-        return
-    async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
-            """
-            UPDATE tasks SET status = 'approved', reviewed_at = NOW()
-            WHERE id = $1 AND status = 'pending_moderation'
-            RETURNING creator_id
-            """,
-            task_id,
-        )
-    if row is None:
-        await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
-        return
-    await callback.answer("Заказ одобрен.")
-    if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(f"✅ Заказ #{task_id} одобрен.")
-    await callback.bot.send_message(
-        row["creator_id"],
-        f"✅ Ваш заказ #{task_id} одобрен модератором. "
-        "Следующим этапом подключим резервирование оплаты и публикацию для исполнителей.",
+        await callback.message.answer(
+            f"Категория: {CATEGORIES[key]}\n\nТеперь напишите сообщение. "
+            "Своё фото загрузить нельзя. На следующем этапе добавим выбор фирменных картинок."
+        )
+
+
+@dp.message(AnonymousFlow.text)
+async def receive_anonymous_text(message: Message, state: FSMContext, bot: Bot) -> None:
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("Пожалуйста, отправьте текстовое сообщение.")
+        return
+    if len(body) > 2000:
+        await message.answer("Сообщение слишком длинное. Максимум — 2000 символов.")
+        return
+    data = await state.get_data()
+    sender = message.from_user
+    recipient_id = data.get("recipient_id")
+    category = data.get("category")
+    if sender is None or recipient_id is None or category not in CATEGORIES or db_pool is None:
+        await state.clear()
+        await message.answer("Не удалось отправить сообщение. Начните заново по ссылке.")
+        return
+
+    await save_user(sender)
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO nobody_messages (recipient_id, sender_id, category, body)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+            """, recipient_id, sender.id, category, body)
+        message_id = row["id"]
+    except Exception:
+        log.exception("Could not save anonymous message")
+        await message.answer("Не получилось отправить сообщение. Попробуйте позже.")
+        return
+
+    await state.clear()
+    await message.answer("✅ Анонимное сообщение отправлено!", reply_markup=main_keyboard())
+    try:
+        await bot.send_message(
+            recipient_id,
+            f"💌 Новая анонимка!\n\n{CATEGORIES[category]}\n\n{body}\n\n"
+            f"Номер сообщения: #{message_id}\n"
+            "Раскрытие личности для этого сообщения — 50 ₽ (функция скоро появится).",
+        )
+    except Exception:
+        log.warning("Could not notify recipient %s", recipient_id)
+
+
+@dp.message(F.text == "🔗 Моя ссылка")
+async def my_link(message: Message, bot: Bot) -> None:
+    if message.from_user is None:
+        return
+    username = await get_bot_username(bot)
+    if not username:
+        await message.answer("Не удалось получить ссылку бота.")
+        return
+    link = f"https://t.me/{username}?start=to_{message.from_user.id}"
+    await message.answer(
+        "🔗 Твоя персональная ссылка:\n"
+        f"{link}\n\n"
+        "Скопируй её и отправь друзьям или размести в соцсетях."
     )
 
 
-@dp.callback_query(F.data.startswith("task:reject:"))
-async def admin_reject(callback: CallbackQuery, state: FSMContext) -> None:
-    task_id = int(callback.data.rsplit(":", 1)[1])
-    await begin_admin_decision(callback, state, task_id, "rejected")
-
-
-@dp.callback_query(F.data.startswith("task:revision:"))
-async def admin_revision(callback: CallbackQuery, state: FSMContext) -> None:
-    task_id = int(callback.data.rsplit(":", 1)[1])
-    await begin_admin_decision(callback, state, task_id, "revision")
-
-
-@dp.message(AdminDecision.reason)
-async def admin_reason(message: Message, state: FSMContext) -> None:
-    if message.from_user is None or ADMIN_ID is None or message.from_user.id != ADMIN_ID:
-        await state.clear()
+@dp.message(F.text == "📩 Входящие")
+async def inbox(message: Message) -> None:
+    if message.from_user is None or db_pool is None:
+        await message.answer("Не удалось загрузить сообщения.")
         return
-    reason = (message.text or "").strip()
-    if len(reason) < 3:
-        await message.answer("Напишите причину подробнее (минимум 3 символа).")
-        return
-    if len(reason) > 1500:
-        await message.answer("Слишком длинный текст. Максимум — 1500 символов.")
-        return
-
-    data = await state.get_data()
-    task_id = data["task_id"]
-    decision = data["decision"]
-    if db_pool is None:
-        await message.answer("База данных недоступна. Попробуйте позже.")
-        return
-
-    async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
-            """
-            UPDATE tasks
-            SET status = $2, admin_reason = $3, reviewed_at = NOW()
-            WHERE id = $1 AND status = 'pending_moderation'
-            RETURNING creator_id
-            """,
-            task_id,
-            decision,
-            reason,
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, category, body, created_at
+            FROM nobody_messages
+            WHERE recipient_id = $1
+            ORDER BY created_at DESC
+            LIMIT 10
+        """, message.from_user.id)
+        await conn.execute(
+            "UPDATE nobody_messages SET is_read = TRUE WHERE recipient_id = $1",
+            message.from_user.id,
         )
-    await state.clear()
-    if row is None:
-        await message.answer("Заявка уже обработана или не найдена.", reply_markup=main_keyboard())
+    if not rows:
+        await message.answer("📭 Пока сообщений нет. Поделись своей ссылкой!")
         return
-
-    if decision == "rejected":
-        await message.answer(f"❌ Заказ #{task_id} отклонён. Причина отправлена заказчику.")
-        user_text = f"❌ Ваш заказ #{task_id} отклонён.\nПричина: {reason}"
-    else:
-        await message.answer(f"📝 Заказ #{task_id} отправлен на доработку.")
-        user_text = (
-            f"📝 Ваш заказ #{task_id} отправлен на доработку.\n"
-            f"Комментарий администратора: {reason}\n\n"
-            "Исправьте описание и отправьте заказ повторно через создание задания."
+    for row in rows:
+        await message.answer(
+            f"💌 Анонимное сообщение #{row['id']}\n"
+            f"{CATEGORIES.get(row['category'], '💬 Другое')}\n\n"
+            f"{row['body']}\n\n"
+            "Раскрытие личности — 50 ₽ (скоро)."
         )
-    await message.bot.send_message(row["creator_id"], user_text)
 
 
 @dp.message(F.text == "💰 Баланс")
 async def balance(message: Message) -> None:
     if message.from_user is None or db_pool is None:
-        await message.answer("Не удалось загрузить баланс. Попробуйте позже.")
+        await message.answer("Баланс пока недоступен.")
         return
-
-    async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
-            "SELECT balance FROM users WHERE telegram_id = $1",
+    async with db_pool.acquire() as conn:
+        amount = await conn.fetchval(
+            "SELECT balance FROM nobody_users WHERE telegram_id = $1",
             message.from_user.id,
         )
-
-    if row is None:
-        await register_user(message)
-        amount = Decimal("0.00")
-    else:
-        amount = row["balance"]
-
-    await message.answer(
-        f"💰 Ваш баланс: {amount:.2f} ₽\n\n"
-        "Пополнение и вывод средств будут подключены следующим этапом."
-    )
+    await message.answer(f"💰 Твой баланс: {amount or Decimal('0.00')} ₽\n\nПополнение подключим следующим этапом.")
 
 
 @dp.message(F.text == "👤 Профиль")
 async def profile(message: Message) -> None:
-    if message.from_user is None or db_pool is None:
-        await message.answer("Не удалось загрузить профиль. Попробуйте позже.")
+    user = message.from_user
+    if user is None:
         return
-
-    async with db_pool.acquire() as connection:
-        row = await connection.fetchrow(
-            """
-            SELECT telegram_id, username, first_name, created_at
-            FROM users
-            WHERE telegram_id = $1
-            """,
-            message.from_user.id,
-        )
-
-        if row is None:
-            user = message.from_user
-            await connection.execute(
-                """
-                INSERT INTO users (telegram_id, username, first_name)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (telegram_id) DO NOTHING
-                """,
-                user.id,
-                user.username,
-                user.first_name or "",
-            )
-            row = await connection.fetchrow(
-                """
-                SELECT telegram_id, username, first_name, created_at
-                FROM users
-                WHERE telegram_id = $1
-                """,
-                user.id,
-            )
-
-    username = f"@{row['username']}" if row["username"] else "не указан"
-    joined = row["created_at"].strftime("%d.%m.%Y")
-
+    username = f"@{user.username}" if user.username else "не указан"
     await message.answer(
-        "👤 Ваш профиль\n\n"
-        f"Имя: {row['first_name']}\n"
+        "👤 Профиль VIP NOBODY\n\n"
+        f"Имя: {user.first_name or 'не указано'}\n"
         f"Username: {username}\n"
-        f"ID: {row['telegram_id']}\n"
-        f"Дата регистрации: {joined}"
+        f"Telegram ID: {user.id}"
     )
 
 
-@dp.message(F.text == "📚 История заказов")
-async def task_history(message: Message) -> None:
-    if message.from_user is None or db_pool is None:
-        await message.answer("Не удалось загрузить историю. Попробуйте позже.")
-        return
-
-    async with db_pool.acquire() as connection:
-        rows = await connection.fetch(
-            """
-            SELECT id, description, total_cost, status, admin_reason, created_at
-            FROM tasks
-            WHERE creator_id = $1
-            ORDER BY created_at DESC
-            LIMIT 10
-            """,
-            message.from_user.id,
-        )
-
-    if not rows:
-        await message.answer("📚 У вас пока нет заказов.", reply_markup=main_keyboard())
-        return
-
-    status_names = {
-        "pending_moderation": "⏳ На модерации",
-        "approved": "✅ Одобрен",
-        "rejected": "❌ Отклонён",
-        "revision": "📝 Требует доработки",
-    }
-
-    lines = ["📚 Последние 10 заказов:"]
-    for row in rows:
-        created = row["created_at"].strftime("%d.%m.%Y %H:%M")
-        status = status_names.get(row["status"], row["status"])
-        lines.append(
-            f"\nЗаказ #{row['id']} — {status}\n"
-            f"Дата: {created}\n"
-            f"Стоимость: {row['total_cost']:.2f} ₽\n"
-            f"Описание: {row['description'][:350]}"
-        )
-        if row["admin_reason"]:
-            lines.append(f"Комментарий модератора: {row['admin_reason'][:500]}")
-
-    await message.answer("\n\n".join(lines), reply_markup=main_keyboard())
+@dp.message(F.text == "⚙️ Настройки")
+async def settings(message: Message) -> None:
+    await message.answer("⚙️ Настройки\n\nДополнительные настройки добавим позже.")
 
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_message(message: Message) -> None:
     await message.answer(
-        "VIP TASK — биржа реальных услуг.\n\n"
-        "Опишите заказ своими словами: категории выбирать не нужно. "
-        "Можно размещать создание текстов, дизайн, монтаж, переводы, "
-        "расшифровку аудио, исследования, сбор информации, тестирование "
-        "сайтов и другие реальные услуги.\n\n"
-        "Запрещены накрутка показателей и фиктивные отзывы. "
-        "Каждый заказ проверяется администратором до публикации."
+        "ℹ️ VIP NOBODY\n\n"
+        "1. Нажми «Моя ссылка» и поделись ею.\n"
+        "2. Другой человек перейдёт по ссылке и отправит анонимное сообщение.\n"
+        "3. Сообщения появятся в разделе «Входящие».\n\n"
+        "Обычная отправка бесплатная. Раскрытие личности планируется за 50 ₽. "
+        "Анонимность не абсолютная: технические данные отправителя сохраняются."
     )
 
 
 async def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в переменных Railway.")
-
     await init_database()
-
     bot = Bot(token=BOT_TOKEN)
     try:
         await dp.start_polling(bot)
