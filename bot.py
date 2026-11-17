@@ -90,7 +90,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"❤️ Посмотреть сердечко — {price:.2f} ₽", callback_data="card:preview")],
+        [InlineKeyboardButton(text="❤️ Посмотреть сердечко", callback_data="card:preview")],
         [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
     ])
 
@@ -356,15 +356,12 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await clear_flow_message(bot, callback.from_user.id, state)
     if file_id and callback.message:
         sent = await bot.send_photo(callback.from_user.id, file_id,
-            caption=f"❤️ Красное сердечко — {card_price:.2f} ₽\n\nТак будет выглядеть открытка у получателя.",
+            caption=f"❤️ Красное сердечко — {card_price:.2f} ₽\n\n{data['body']}",
             reply_markup=preview_keyboard(card_price))
         await state.update_data(flow_bot_message_id=sent.message_id)
     elif callback.message:
         await send_flow_message(bot, callback.from_user.id, state,
-            "❤️ ПРЕДПРОСМОТР ОТКРЫТКИ\n\n"
-            "Красное сердечко на тёмном фоне.\n"
-            "Логотип VIP NOBODY будет маленьким и аккуратным в углу.\n\n"
-            f"Стоимость: {card_price:.2f} ₽",
+            f"❤️ Красное сердечко — {card_price:.2f} ₽\n\n{data['body']}",
             reply_markup=preview_keyboard(card_price))
 
 @dp.callback_query(F.data == "card:back")
