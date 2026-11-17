@@ -213,7 +213,6 @@ async def init_database() -> None:
             )
         """)
         await conn.execute("""
-        await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_transactions (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL,
