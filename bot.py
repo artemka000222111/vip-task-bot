@@ -2248,9 +2248,10 @@ async def admin_price_save(message: Message, state: FSMContext):
         return
     try:
         value = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        data_for_limit = await state.get_data()
         limit = Decimal("1000000")
-        if value < 0 or value > limit:
+        data_for_limit = await state.get_data()
+        minimum_key = data_for_limit.get("price_kind") in ("min_topup_amount", "min_withdraw_amount")
+        if value < 0 or (minimum_key and value <= 0) or value > limit:
             raise InvalidOperation
     except (InvalidOperation, ValueError):
         await message.answer("Введи корректную цену от 0 до 1 000 000 ₽.")
