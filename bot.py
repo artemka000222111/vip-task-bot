@@ -180,7 +180,11 @@ async def send_ui_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
     return sent
 
 def add_menu_back_button(reply_markup):
-    if reply_markup is None or not isinstance(reply_markup, InlineKeyboardMarkup):
+    if reply_markup is None:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="nav:home")]
+        ])
+    if not isinstance(reply_markup, InlineKeyboardMarkup):
         return reply_markup
     rows = [list(row) for row in reply_markup.inline_keyboard]
     if not any(
@@ -639,8 +643,12 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AnonymousFlow.text)
     if callback.message:
-        await callback.message.edit_text(f"{CATEGORIES[key]}\n\nТеперь напишите текст сообщения.")
-        await state.update_data(flow_bot_message_id=callback.message.message_id)
+        sent = await replace_callback_message(
+            callback,
+            f"{CATEGORIES[key]}\n\nТеперь напишите текст сообщения."
+        )
+        if sent:
+            await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
 
 @dp.message(AnonymousFlow.text)
 async def receive_text(message: Message, state: FSMContext):
@@ -1083,7 +1091,7 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
         await callback.answer("Не удалось выполнить операцию. Попробуй ещё раз.", show_alert=True)
 
 @dp.message(F.text == "💼 Мой заработок")
-async def partner_cabinet(message: Message, bot: Bot):
+async def partner_cabinet(message: Message, bot: Bot, state: FSMContext):
     async with db_pool.acquire() as conn:
         bonus_enabled = await conn.fetchval(
             "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
@@ -1105,7 +1113,8 @@ async def partner_cabinet(message: Message, bot: Bot):
         [InlineKeyboardButton(text="📤 Вывести заработок", callback_data="partner:withdraw")],
         [InlineKeyboardButton(text="📨 Поделиться ссылкой", callback_data="partner:share")],
     ])
-    await message.answer(
+    await send_ui_message(
+        bot, message.chat.id, state,
         "💼 МОЙ ЗАРАБОТОК\n\n" + signup_bonus_text,
         reply_markup=kb
     )
