@@ -101,6 +101,12 @@ def category_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
     ])
 
+def message_send_options_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить", callback_data="card:free")],
+        [InlineKeyboardButton(text="🖼 Открытки", callback_data="card:choose")],
+    ])
+
 def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️ Красное сердечко", callback_data="card:select:heart")],
@@ -108,7 +114,7 @@ def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💔 Разбитое сердце", callback_data="card:select:broken")],
         [InlineKeyboardButton(text="💌 Тайный конверт", callback_data="card:select:envelope")],
         [InlineKeyboardButton(text="🎁 Подарить деньги", callback_data="card:gift")],
-        [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="card:actions")],
     ])
 
 def preview_keyboard(price: Decimal) -> InlineKeyboardMarkup:
@@ -422,10 +428,9 @@ async def receive_text(message: Message, state: FSMContext):
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
-    card_price = await get_price("card_price")
     await send_flow_message(message.bot, message.chat.id, state,
-                                "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай открытку и отправляй красиво!",
-                                reply_markup=postcard_keyboard(card_price))
+                                "💌 Сообщение готово! Что делаем дальше?",
+                                reply_markup=message_send_options_keyboard())
 
 @dp.callback_query(F.data == "gift:resume")
 async def gift_resume(callback: CallbackQuery, state: FSMContext):
@@ -533,6 +538,35 @@ async def gift_visibility(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer("Напиши текст, который будет приложен к денежному подарку:")
 
 
+@dp.callback_query(F.data == "card:choose")
+async def choose_postcard_option(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if not data.get("body"):
+        await callback.answer("Сначала напиши текст сообщения.", show_alert=True)
+        return
+    card_price = await get_price("card_price")
+    await callback.answer()
+    if callback.message:
+        await send_flow_message(
+            bot, callback.from_user.id, state,
+            "💌 Выбери открытку для своего сообщения:",
+            reply_markup=postcard_keyboard(card_price)
+        )
+
+@dp.callback_query(F.data == "card:actions")
+async def back_to_message_actions(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if not data.get("body"):
+        await callback.answer("Начни отправку заново по ссылке.", show_alert=True)
+        return
+    await callback.answer()
+    if callback.message:
+        await send_flow_message(
+            bot, callback.from_user.id, state,
+            "💌 Сообщение готово! Что делаем дальше?",
+            reply_markup=message_send_options_keyboard()
+        )
+
 @dp.callback_query(F.data.startswith("card:select:"))
 async def select_postcard(callback: CallbackQuery, state: FSMContext, bot: Bot):
     key = callback.data.rsplit(":", 1)[1]
@@ -573,7 +607,8 @@ async def card_back(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.message:
         card_price = await get_price("card_price")
         await send_flow_message(bot, callback.from_user.id, state,
-                                "💌 Укрась своё сообщение открыткой!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай настроение послания:", reply_markup=postcard_keyboard(card_price))
+                                "💌 Выбери открытку для своего сообщения:",
+                                reply_markup=postcard_keyboard(card_price))
 
 async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot, paid_card: bool):
     data = await state.get_data()
