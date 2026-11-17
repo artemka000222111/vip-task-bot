@@ -134,10 +134,10 @@ async def init_database() -> None:
                 telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT NOT NULL DEFAULT '',
                 last_name TEXT, balance NUMERIC(12,2) NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                last_active_at TIMESTAMPTZ
             )
         """)
-        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_messages (
                 id BIGSERIAL PRIMARY KEY,
@@ -212,8 +212,8 @@ async def save_user(user) -> None:
         return
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO nobody_users (telegram_id, username, first_name, last_name)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO nobody_users (telegram_id, username, first_name, last_name, last_active_at)
+            VALUES ($1, $2, $3, $4, NOW())
             ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username,
                 first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
                 last_active_at=NOW()
