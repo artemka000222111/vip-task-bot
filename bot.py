@@ -162,10 +162,7 @@ async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
 
 async def send_flow_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
                             reply_markup=None) -> Message:
-    await clear_flow_message(bot, chat_id, state)
-    sent = await bot.send_message(chat_id, text, reply_markup=add_menu_back_button(reply_markup))
-    await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
-    return sent
+    return await send_ui_message(bot, chat_id, state, text, reply_markup=reply_markup)
 
 
 async def send_ui_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
@@ -250,6 +247,25 @@ class FlowInputCleanupMiddleware(BaseMiddleware):
 
 
 dp.message.middleware(FlowInputCleanupMiddleware())
+
+
+class CallbackPromptTrackingMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        result = await handler(event, data)
+        state = data.get("state")
+        if isinstance(event, CallbackQuery) and event.message is not None and state is not None:
+            try:
+                if await state.get_state() is not None:
+                    await state.update_data(
+                        flow_bot_message_id=event.message.message_id,
+                        ui_bot_message_id=event.message.message_id
+                    )
+            except Exception:
+                log.debug("Could not track callback prompt message")
+        return result
+
+
+dp.callback_query.middleware(CallbackPromptTrackingMiddleware())
 
 async def init_database() -> None:
     global db_pool
@@ -619,7 +635,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
                 sent = await callback.message.answer_photo(gift_photo, caption=caption, reply_markup=add_menu_back_button(kb))
             else:
                 sent = await replace_callback_message(callback, caption, reply_markup=kb)
-            await state.update_data(flow_bot_message_id=sent.message_id)
+            await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
         return
     await state.set_state(AnonymousFlow.text)
     if callback.message:
@@ -904,11 +920,12 @@ async def callback_return_to_main_menu(callback: CallbackQuery, state: FSMContex
             await callback.message.delete()
         except Exception:
             pass
-    await callback.bot.send_message(
+    sent = await callback.bot.send_message(
         callback.from_user.id,
         "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
         reply_markup=main_keyboard(await is_admin(callback.from_user.id))
     )
+    await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
 
 
 @dp.message(F.text == "🔗 Моя ссылка")
