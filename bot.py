@@ -980,7 +980,11 @@ async def partner_withdraw_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.message:
         await callback.message.answer(
-            f"📤 Доступно: {balance:.2f} ₽. Введи сумму от 100 ₽:",
+            "📤 ВЫВОД ПАРТНЁРСКОГО ЗАРАБОТКА\n\n"
+            "Вывод доступен только через СБП.\n"
+            "Понадобятся номер телефона, привязанный к СБП, и название банка.\n\n"
+            f"Доступно: {balance:.2f} ₽\n"
+            "Введи сумму для вывода (минимум 100 ₽):",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="partner:cancel")]
             ])
@@ -1011,7 +1015,10 @@ async def partner_withdraw_amount(message: Message, state: FSMContext):
         return
     await state.update_data(partner_amount=str(amount))
     await state.set_state(PartnerWithdrawFlow.phone)
-    await message.answer("Укажи номер телефона для получения перевода:")
+    await message.answer(
+        "📱 Введи номер телефона, который привязан к СБП.\n"
+        "На этот номер будет отправлен перевод:"
+    )
 
 
 @dp.message(PartnerWithdrawFlow.phone)
@@ -1023,7 +1030,9 @@ async def partner_withdraw_phone(message: Message, state: FSMContext):
         return
     await state.update_data(partner_phone=phone)
     await state.set_state(PartnerWithdrawFlow.bank)
-    await message.answer("Укажи название банка:")
+    await message.answer(
+        "🏦 Укажи название банка, в котором подключён СБП:"
+    )
 
 
 @dp.message(PartnerWithdrawFlow.bank)
@@ -1062,7 +1071,12 @@ async def partner_withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     ]])
     await bot.send_message(
         ADMIN_ID,
-        f"📤 ПАРТНЁРСКИЙ ВЫВОД №{wid}\nСумма: {amount:.2f} ₽\nТелефон: {data['partner_phone']}\nБанк: {bank}\nTelegram ID: {uid}",
+        f"📤 ЗАЯВКА НА ВЫВОД ПАРТНЁРСКОГО ЗАРАБОТКА №{wid}\n\n"
+        f"Сумма: {amount:.2f} ₽\n"
+        f"Способ: СБП\n"
+        f"Телефон: {data['partner_phone']}\n"
+        f"Банк: {bank}\n"
+        f"Telegram ID: {uid}",
         reply_markup=kb
     )
 
