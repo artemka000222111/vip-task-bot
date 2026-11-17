@@ -203,7 +203,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
         await state.set_state(AnonymousFlow.category)
         await message.answer(
             "Выберите категорию анонимного сообщения.\n\n"
-            "Важно: сервис сохраняет технические данные отправителя. Получатель сможет раскрыть доступные данные профиля за 50 ₽.",
+            "Учти: твою личность могут раскрыть.",
             reply_markup=category_keyboard())
         return
     await message.answer(
