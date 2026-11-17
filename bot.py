@@ -146,6 +146,18 @@ async def get_price(key: str) -> Decimal:
         raise ValueError("Администратор ещё не установил цену для этой услуги.")
     return Decimal(value)
 
+
+async def notify_admin_event(bot: Bot, text: str) -> None:
+    try:
+        async with db_pool.acquire() as conn:
+            enabled = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='admin_event_notifications'"
+            )
+        if str(enabled or "true").lower() == "true":
+            await bot.send_message(ADMIN_ID, text)
+    except Exception:
+        log.exception("Could not send admin event notification")
+
 async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
     message_id = data.get("flow_bot_message_id")
@@ -322,7 +334,7 @@ async def init_database() -> None:
         await conn.execute("""
             INSERT INTO nobody_settings (key, value)
             VALUES ('min_topup_amount', '1'), ('min_withdraw_amount', '10'),
-                   ('referral_bonus_enabled', 'true'), ('referral_bonus_amount', '2')
+                   ('referral_bonus_enabled', 'true'), ('referral_bonus_amount', '2'), ('admin_event_notifications', 'true')
             ON CONFLICT (key) DO NOTHING
         """)
         await conn.execute("""
@@ -619,6 +631,24 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                     await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
         if referral_bonus:
             referrer_id, credited_amount = referral_bonus
+            async with db_pool.acquire() as conn:
+                referrer_info = await conn.fetchrow(
+                    "SELECT username, first_name FROM nobody_users WHERE telegram_id=$1",
+                    referrer_id
+                )
+            referred_name = " ".join(part for part in [message.from_user.first_name, message.from_user.last_name] if part) or "Без имени"
+            referred_username = f"@{message.from_user.username}" if message.from_user.username else "username не указан"
+            referrer_name = (referrer_info["first_name"] or "Без имени") if referrer_info else "Неизвестно"
+            referrer_username = f"@{referrer_info['username']}" if referrer_info and referrer_info["username"] else "username не указан"
+            await notify_admin_event(
+                bot,
+                "👥 НОВЫЙ РЕФЕРАЛ\\n\\n"
+                f"Пригласивший: {referrer_name} ({referrer_username})\\n"
+                f"ID пригласившего: {referrer_id}\\n"
+                f"Новый пользователь: {referred_name} ({referred_username})\\n"
+                f"ID нового пользователя: {message.from_user.id}\\n"
+                f"💰 Начислен бонус: {credited_amount:g} ₽"
+            )
             try:
                 await bot.send_message(
                     referrer_id,
@@ -925,6 +955,16 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
                     VALUES ($1,$2,$3,$4,$5) RETURNING id
                 """, recipient_id, sender_id, category, body, paid_card)
         await state.clear()
+        if paid_card:
+            buyer_name = " ".join(part for part in [callback.from_user.first_name, callback.from_user.last_name] if part) or "Без имени"
+            buyer_username = f"@{callback.from_user.username}" if callback.from_user.username else "username не указан"
+            await notify_admin_event(
+                bot,
+                "💌 ПОКУПКА ОТКРЫТКИ\\n\\n"
+                f"Пользователь: {buyer_name} ({buyer_username})\\n"
+                f"Telegram ID: {sender_id}\\n"
+                f"Сумма покупки: {card_price:.2f} ₽"
+            )
         if paid_card and referral_commission:
             try:
                 await bot.send_message(referral_commission[0], f"💰 Вам начислено {referral_commission[1]:.2f} ₽ за покупку открытки приглашённым пользователем.")
@@ -1097,6 +1137,17 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                         "Комиссия за раскрытие личности приглашённым пользователем"
                     )
                     already_revealed = False
+        if not already_revealed:
+            buyer_name = " ".join(part for part in [callback.from_user.first_name, callback.from_user.last_name] if part) or "Без имени"
+            buyer_username = f"@{callback.from_user.username}" if callback.from_user.username else "username не указан"
+            await notify_admin_event(
+                bot,
+                "🔎 ПОКУПКА РАСКРЫТИЯ ЛИЧНОСТИ\\n\\n"
+                f"Пользователь: {buyer_name} ({buyer_username})\\n"
+                f"Telegram ID: {user_id}\\n"
+                f"Сумма покупки: {reveal_price:.2f} ₽\\n"
+                f"Сообщение №{message_id}"
+            )
         if not already_revealed and referral_commission:
             try:
                 await bot.send_message(referral_commission[0], f"💰 Вам начислено {referral_commission[1]:.2f} ₽ за раскрытие личности приглашённым пользователем.")
@@ -2074,7 +2125,14 @@ async def support_block_target(message: Message, state: FSMContext):
 async def admin_panel(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await message.answer("Нет доступа."); return
+    async with db_pool.acquire() as conn:
+        event_notifications = await conn.fetchval(
+            "SELECT value FROM nobody_settings WHERE key='admin_event_notifications'"
+        )
+    event_notifications_on = str(event_notifications or "true").lower() == "true"
+    event_toggle_label = "🔔 Уведомления о событиях: ВКЛ" if event_notifications_on else "🔕 Уведомления о событиях: ВЫКЛ"
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=event_toggle_label, callback_data="admin:events_toggle")],
         [InlineKeyboardButton(text="➕ Начислить баланс", callback_data="admin:credit"),
          InlineKeyboardButton(text="➖ Списать баланс", callback_data="admin:debit")],
         [InlineKeyboardButton(text="✉️ Написать пользователю", callback_data="support:direct")],
@@ -2216,6 +2274,20 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.message_view_user)
         if callback.message:
             await replace_callback_message(callback, "Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
+    elif action == "events_toggle":
+        async with db_pool.acquire() as conn:
+            current = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='admin_event_notifications'"
+            )
+            new_value = "false" if str(current or "true").lower() == "true" else "true"
+            await conn.execute(
+                """INSERT INTO nobody_settings (key,value) VALUES ('admin_event_notifications',$1)
+                   ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
+                new_value
+            )
+        status = "ВКЛЮЧЕНЫ" if new_value == "true" else "ВЫКЛЮЧЕНЫ"
+        if callback.message:
+            await replace_callback_message(callback, f"🔔 Уведомления о событиях {status}.\\n\\nОткрой админ-панель ещё раз, чтобы увидеть обновлённый переключатель.")
     elif action == "restore_menu":
         async with db_pool.acquire() as conn:
             user_ids = await conn.fetch("SELECT telegram_id FROM nobody_users ORDER BY telegram_id")
