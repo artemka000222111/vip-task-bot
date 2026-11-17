@@ -124,7 +124,7 @@ def insufficient_balance_keyboard() -> InlineKeyboardMarkup:
     ])
 
 async def get_price(key: str) -> Decimal:
-    defaults = {"card_price": CARD_PRICE, "reveal_price": REVEAL_PRICE}
+    defaults = {"card_price": CARD_PRICE, "reveal_price": REVEAL_PRICE, "withdraw_commission": Decimal("10.00")}
     async with db_pool.acquire() as conn:
         value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", key)
     return Decimal(value) if value is not None else defaults[key]
@@ -233,10 +233,15 @@ async def init_database() -> None:
             CREATE TABLE IF NOT EXISTS nobody_withdrawals (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL CHECK (amount > 0), phone TEXT NOT NULL, bank TEXT NOT NULL,
+                commission_percent NUMERIC(5,2) NOT NULL DEFAULT 10.00,
+                payout_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), reviewed_at TIMESTAMPTZ
             )
         """)
+        await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS commission_percent NUMERIC(5,2) NOT NULL DEFAULT 10.00")
+        await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2) NOT NULL DEFAULT 0")
+        await conn.execute("UPDATE nobody_withdrawals SET payout_amount=amount WHERE payout_amount=0")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_topups (
                 id BIGSERIAL PRIMARY KEY,
@@ -400,9 +405,9 @@ async def gift_start(callback: CallbackQuery, state: FSMContext):
 async def gift_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        if amount < Decimal("10") or amount > Decimal("1000000"): raise InvalidOperation
+        if amount < Decimal("10") or amount > Decimal("5000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Минимальная сумма подарка — 10 ₽. Введи корректную сумму."); return
+        await message.answer("Сумма подарка должна быть от 10 до 5 000 ₽. Введи корректную сумму."); return
     if await get_balance(message.from_user.id) < amount:
         await message.answer("Недостаточно средств для такого подарка.", reply_markup=insufficient_balance_keyboard())
         await state.clear(); return
@@ -706,7 +711,12 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(WithdrawFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("💸 Вывод средств\n\nВведи сумму вывода:")
+        commission = await get_price("withdraw_commission")
+        await callback.message.answer(
+            f"💸 Вывод средств\n\nКомиссия на вывод: {commission:.2f}%\n"
+            "Комиссия будет удержана из суммы вывода. На карту поступит сумма за вычетом комиссии.\n\n"
+            "Введи сумму, которую хочешь списать с баланса:"
+        )
 
 @dp.message(WithdrawFlow.amount)
 async def withdraw_amount(message: Message, state: FSMContext):
@@ -718,7 +728,9 @@ async def withdraw_amount(message: Message, state: FSMContext):
     if await get_balance(message.from_user.id) < amount:
         await state.clear()
         await message.answer("Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
-    await state.update_data(withdraw_amount=str(amount))
+    commission = await get_price("withdraw_commission")
+    payout = (amount * (Decimal("100") - commission) / Decimal("100")).quantize(Decimal("0.01"))
+    await state.update_data(withdraw_amount=str(amount), withdraw_commission=str(commission), withdraw_payout=str(payout))
     await state.set_state(WithdrawFlow.phone)
     await message.answer("Укажи номер телефона для получения перевода:")
 
@@ -746,13 +758,22 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
             if updated is None:
                 await state.clear()
                 await message.answer("Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
-            wid = await conn.fetchval("INSERT INTO nobody_withdrawals (user_id,amount,phone,bank) VALUES ($1,$2,$3,$4) RETURNING id", uid, amount, data["withdraw_phone"], bank)
+            wid = await conn.fetchval("INSERT INTO nobody_withdrawals (user_id,amount,phone,bank,commission_percent,payout_amount) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", uid, amount, data["withdraw_phone"], bank, Decimal(data["withdraw_commission"]), Decimal(data["withdraw_payout"]))
             await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Заявка на вывод средств',$3)", uid, -amount, f"withdraw:{wid}")
     await state.clear()
-    await message.answer(f"✅ Заявка на вывод №{wid} отправлена. {amount:.2f} ₽ списаны до проверки.")
+    commission = Decimal(data["withdraw_commission"])
+    payout = Decimal(data["withdraw_payout"])
+    await message.answer(
+        f"✅ Заявка на вывод №{wid} отправлена.\n\n"
+        f"Сумма списания: {amount:.2f} ₽\nКомиссия ({commission:.2f}%): {amount - payout:.2f} ₽\n"
+        f"К получению: {payout:.2f} ₽\n\nСредства списаны до проверки."
+    )
     user = message.from_user
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"), InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")]])
-    await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\nСумма: {amount:.2f} ₽\nТелефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\nUsername: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
+    await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\nСписать с баланса: {amount:.2f} ₽\n"
+        f"Комиссия ({commission:.2f}%): {amount - payout:.2f} ₽\nК выплате: {payout:.2f} ₽\n"
+        f"Телефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\n"
+        f"Username: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("withdraw:approve:"))
 async def withdraw_approve(callback: CallbackQuery):
@@ -760,12 +781,12 @@ async def withdraw_approve(callback: CallbackQuery):
         await callback.answer("Нет доступа.", show_alert=True); return
     wid = int(callback.data.rsplit(":",1)[1])
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("UPDATE nobody_withdrawals SET status='approved',reviewed_at=NOW() WHERE id=$1 AND status='pending' RETURNING user_id,amount", wid)
+        row = await conn.fetchrow("UPDATE nobody_withdrawals SET status='approved',reviewed_at=NOW() WHERE id=$1 AND status='pending' RETURNING user_id,amount,payout_amount", wid)
     if not row:
         await callback.answer("Заявка уже обработана.", show_alert=True); return
     await callback.answer("Отмечено как выплачено.")
     if callback.message: await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.bot.send_message(row["user_id"], f"✅ Вывод №{wid} отмечен как выплаченный: {Decimal(row['amount']):.2f} ₽.")
+    await callback.bot.send_message(row["user_id"], f"✅ Вывод №{wid} отмечен как выплаченный. На карту отправлено: {Decimal(row['payout_amount']):.2f} ₽.")
 
 @dp.callback_query(F.data.startswith("withdraw:reject:"))
 async def withdraw_reject(callback: CallbackQuery):
@@ -1351,6 +1372,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_price:.2f} ₽", callback_data="price:card")],
             [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_price:.2f} ₽", callback_data="price:reveal")],
+            [InlineKeyboardButton(text=f"💸 Комиссия вывода: {await get_price('withdraw_commission'):.2f}%", callback_data="price:withdraw")],
         ])
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
@@ -1415,19 +1437,19 @@ async def stats_earnings(callback: CallbackQuery):
             f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
         )
 
-@dp.callback_query(F.data.in_({"price:card", "price:reveal"}))
+@dp.callback_query(F.data.in_({"price:card", "price:reveal", "price:withdraw"}))
 async def admin_price_start(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    kind = "card_price" if callback.data == "price:card" else "reveal_price"
-    title = "открытки" if kind == "card_price" else "раскрытия личности"
+    kind = {"price:card": "card_price", "price:reveal": "reveal_price", "price:withdraw": "withdraw_commission"}[callback.data]
+    title = {"card_price": "открытки", "reveal_price": "раскрытия личности", "withdraw_commission": "комиссию вывода"}[kind]
     await state.clear()
     await state.update_data(price_kind=kind)
     await state.set_state(AdminFlow.price_value)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(f"Введи новую цену {title} в рублях:")
+        await callback.message.answer("Введи комиссию вывода в процентах (от 0 до 100):" if kind == "withdraw_commission" else f"Введи новую цену {title} в рублях:")
 
 @dp.message(AdminFlow.price_value)
 async def admin_price_save(message: Message, state: FSMContext):
@@ -1436,14 +1458,16 @@ async def admin_price_save(message: Message, state: FSMContext):
         return
     try:
         value = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        if value < 0 or value > Decimal("1000000"):
+        data_for_limit = await state.get_data()
+        limit = Decimal("100") if data_for_limit.get("price_kind") == "withdraw_commission" else Decimal("1000000")
+        if value < 0 or value > limit:
             raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи корректную цену от 0 до 1 000 000 ₽.")
+        await message.answer("Введи корректное значение: комиссия от 0 до 100%, цена от 0 до 1 000 000 ₽.")
         return
     data = await state.get_data()
     key = data.get("price_kind")
-    if key not in ("card_price", "reveal_price"):
+    if key not in ("card_price", "reveal_price", "withdraw_commission"):
         await state.clear()
         await message.answer("Не удалось определить тип цены. Открой настройки заново.")
         return
@@ -1453,8 +1477,9 @@ async def admin_price_save(message: Message, state: FSMContext):
             key, str(value)
         )
     await state.clear()
-    label = "открытки" if key == "card_price" else "раскрытия личности"
-    await message.answer(f"✅ Новая цена {label}: {value:.2f} ₽")
+    label = {"card_price": "открытки", "reveal_price": "раскрытия личности", "withdraw_commission": "комиссии вывода"}[key]
+    suffix = "%" if key == "withdraw_commission" else " ₽"
+    await message.answer(f"✅ Новое значение {label}: {value:.2f}{suffix}")
 
 @dp.message(AdminFlow.balance_user)
 async def admin_balance_user(message: Message, state: FSMContext):
