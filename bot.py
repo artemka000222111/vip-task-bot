@@ -403,7 +403,7 @@ async def receive_text(message: Message, state: FSMContext):
         ])
         async with db_pool.acquire() as conn:
             gift_photo = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='postcard_file_id_gift'")
-        caption = "🎁 Категория «Подарок»\n\nТак будет выглядеть подарок у получателя.\n\nНажми «Подарить деньги», чтобы выбрать сумму."
+        caption = f"{body}\n\nТак будет выглядеть подарок у получателя.\n\nНажми «Подарить деньги», чтобы выбрать сумму."
         await clear_flow_message(message.bot, message.chat.id, state)
         if gift_photo:
             sent = await message.bot.send_photo(message.chat.id, gift_photo, caption=caption, reply_markup=gift_only)
