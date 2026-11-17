@@ -160,10 +160,12 @@ async def init_database() -> None:
                 telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT NOT NULL DEFAULT '',
                 last_name TEXT, balance NUMERIC(12,2) NOT NULL DEFAULT 0,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_active_at TIMESTAMPTZ
+                last_active_at TIMESTAMPTZ,
+                activity_count BIGINT NOT NULL DEFAULT 0
             )
         """)
         await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ")
+        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS activity_count BIGINT NOT NULL DEFAULT 0")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_messages (
                 id BIGSERIAL PRIMARY KEY,
@@ -277,7 +279,7 @@ async def save_user(user) -> None:
             VALUES ($1, $2, $3, $4, NOW())
             ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username,
                 first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
-                last_active_at=NOW()
+                last_active_at=NOW(), activity_count=nobody_users.activity_count+1
         """, user.id, user.username, user.first_name or "", user.last_name)
 
 class ActivityMiddleware(BaseMiddleware):
@@ -1502,9 +1504,9 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
     elif action == "top_active":
         async with db_pool.acquire() as conn:
             users = await conn.fetch(
-                "SELECT username, first_name, last_active_at "
+                "SELECT username, first_name, last_active_at, activity_count "
                 "FROM nobody_users WHERE last_active_at IS NOT NULL "
-                "ORDER BY last_active_at DESC LIMIT 10"
+                "ORDER BY activity_count DESC, last_active_at DESC LIMIT 10"
             )
         if callback.message:
             if not users:
@@ -1515,7 +1517,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
                     username = f"@{user['username']}" if user["username"] else "username не указан"
                     name = user["first_name"] or "Без имени"
                     active_at = user["last_active_at"].strftime("%d.%m.%Y %H:%M")
-                    lines.append(f"{index}. {username} — {name}\n   Активность: {active_at}")
+                    lines.append(f"{index}. {username} — {name}\n   Действий: {user['activity_count']} · Последняя активность: {active_at}")
                 await callback.message.answer("\n".join(lines))
     elif action == "view_messages":
         await state.clear()
