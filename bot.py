@@ -52,6 +52,8 @@ class AdminFlow(StatesGroup):
     balance_amount = State()
     price_value = State()
     message_view_user = State()
+    broadcast_text = State()
+    broadcast_confirm = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
@@ -1862,6 +1864,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -1953,6 +1956,96 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.message_view_user)
         if callback.message:
             await callback.message.answer("Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
+    elif action == "broadcast":
+        await state.clear()
+        await state.set_state(AdminFlow.broadcast_text)
+        if callback.message:
+            await callback.message.answer(
+                "📢 РАССЫЛКА\\n\\nОтправь текст, который нужно разослать всем пользователям бота.\\n"
+                "Можно использовать эмодзи. Для отмены открой админ-панель."
+            )
+
+
+@dp.message(AdminFlow.broadcast_text)
+async def admin_broadcast_text(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("Отправь текстовое сообщение для рассылки.")
+        return
+    if len(body) > 4096:
+        await message.answer("Сообщение слишком длинное. Максимум — 4096 символов.")
+        return
+    await state.update_data(broadcast_body=body)
+    await state.set_state(AdminFlow.broadcast_confirm)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Отправить всем", callback_data="broadcast:send")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
+    ])
+    await message.answer(
+        "👀 ПРЕДПРОСМОТР РАССЫЛКИ\\n\\n"
+        + body
+        + "\\n\\nОтправить это сообщение всем пользователям?",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data.in_({"broadcast:send", "broadcast:cancel"}))
+async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    if callback.data == "broadcast:cancel":
+        await state.clear()
+        await callback.answer("Рассылка отменена.")
+        if callback.message:
+            await callback.message.answer("❌ Рассылка отменена.")
+        return
+
+    if await state.get_state() != AdminFlow.broadcast_confirm.state:
+        await callback.answer("Нет подготовленного сообщения. Начни заново.", show_alert=True)
+        return
+    data = await state.get_data()
+    body = data.get("broadcast_body")
+    if not body:
+        await state.clear()
+        await callback.answer("Текст рассылки не найден.", show_alert=True)
+        return
+
+    await state.clear()
+    await callback.answer("Рассылка запущена.")
+    status_message = None
+    if callback.message:
+        status_message = await callback.message.answer("⏳ Рассылка выполняется. Это может занять некоторое время...")
+
+    async with db_pool.acquire() as conn:
+        user_ids = await conn.fetch("SELECT telegram_id FROM nobody_users ORDER BY telegram_id")
+
+    sent_count = 0
+    failed_count = 0
+    for row in user_ids:
+        try:
+            await bot.send_message(chat_id=row["telegram_id"], text=body)
+            sent_count += 1
+        except Exception as exc:
+            failed_count += 1
+            log.warning("Broadcast failed for user %s: %s", row["telegram_id"], exc)
+        await asyncio.sleep(0.05)
+
+    total = len(user_ids)
+    report = (
+        "✅ РАССЫЛКА ЗАВЕРШЕНА\\n\\n"
+        f"👥 Всего пользователей: {total}\\n"
+        f"📨 Успешно получили: {sent_count}\\n"
+        f"⚠️ Не удалось доставить: {failed_count}"
+    )
+    if status_message:
+        try:
+            await status_message.edit_text(report)
+        except Exception:
+            await callback.message.answer(report)
 
 
 @dp.message(AdminFlow.message_view_user)
