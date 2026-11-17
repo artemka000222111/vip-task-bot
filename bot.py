@@ -399,7 +399,7 @@ async def gift_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(GiftFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("🎁 Денежный подарок\n\nУкажи сумму подарка — не менее 10 ₽. Деньги будут переведены получателю с твоего баланса.")
+        await callback.message.answer("🎁 Денежный подарок\n\nУкажи сумму от 10 до 5 000 ₽. Деньги будут переведены получателю с твоего баланса.")
 
 @dp.message(GiftFlow.amount)
 async def gift_amount(message: Message, state: FSMContext):
@@ -732,7 +732,12 @@ async def withdraw_amount(message: Message, state: FSMContext):
     payout = (amount * (Decimal("100") - commission) / Decimal("100")).quantize(Decimal("0.01"))
     await state.update_data(withdraw_amount=str(amount), withdraw_commission=str(commission), withdraw_payout=str(payout))
     await state.set_state(WithdrawFlow.phone)
-    await message.answer("Укажи номер телефона для получения перевода:")
+    await message.answer(
+        f"Сумма вывода: {amount:.2f} ₽\n"
+        f"Комиссия ({commission:.2f}%): {amount - payout:.2f} ₽\n"
+        f"На карту поступит: {payout:.2f} ₽\n\n"
+        "Теперь укажи номер телефона для получения перевода:"
+    )
 
 @dp.message(WithdrawFlow.phone)
 async def withdraw_phone(message: Message, state: FSMContext):
