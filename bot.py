@@ -2002,7 +2002,7 @@ async def admin_price_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFlow.price_value)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи комиссию вывода в процентах (от 0 до 100):" if kind == "withdraw_commission" else f"Введи новую цену {title} в рублях:")
+        await callback.message.answer(f"Введи новую цену {title} в рублях:")
 
 @dp.message(AdminFlow.price_value)
 async def admin_price_save(message: Message, state: FSMContext):
