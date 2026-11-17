@@ -16,7 +16,7 @@ from aiogram.types import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "5540327696"))
+ADMIN_ID = 5540327696
 
 CARD_PRICE = Decimal("10.00")
 REVEAL_PRICE = Decimal("50.00")
