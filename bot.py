@@ -51,6 +51,7 @@ class AnonymousFlow(StatesGroup):
 class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
+    price_value = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
@@ -87,17 +88,23 @@ def category_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
     ])
 
-def postcard_keyboard() -> InlineKeyboardMarkup:
+def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Посмотреть сердечко — 10 ₽", callback_data="card:preview")],
+        [InlineKeyboardButton(text=f"❤️ Посмотреть сердечко — {price:.2f} ₽", callback_data="card:preview")],
         [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
     ])
 
-def preview_keyboard() -> InlineKeyboardMarkup:
+def preview_keyboard(price: Decimal) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Купить за 10 ₽", callback_data="card:buy")],
+        [InlineKeyboardButton(text=f"💳 Купить за {price:.2f} ₽", callback_data="card:buy")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="card:back")],
     ])
+
+async def get_price(key: str) -> Decimal:
+    defaults = {"card_price": CARD_PRICE, "reveal_price": REVEAL_PRICE}
+    async with db_pool.acquire() as conn:
+        value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", key)
+    return Decimal(value) if value is not None else defaults[key]
 
 async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
@@ -145,6 +152,11 @@ async def init_database() -> None:
             CREATE TABLE IF NOT EXISTS nobody_settings (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
+        """)
+        await conn.execute("""
+            INSERT INTO nobody_settings (key,value) VALUES
+                ('card_price','10.00'), ('reveal_price','50.00')
+            ON CONFLICT (key) DO NOTHING
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_transactions (
@@ -309,9 +321,10 @@ async def receive_text(message: Message, state: FSMContext):
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
+    card_price = await get_price("card_price")
     await send_flow_message(message.bot, message.chat.id, state,
                             "Текст готов! Можно добавить фирменную открытку:",
-                            reply_markup=postcard_keyboard())
+                            reply_markup=postcard_keyboard(card_price))
 
 @dp.callback_query(F.data == "card:preview")
 async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
