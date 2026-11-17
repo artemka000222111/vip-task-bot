@@ -1153,7 +1153,7 @@ async def stats_earnings(callback: CallbackQuery):
             "SELECT COALESCE(SUM(balance), 0) FROM nobody_users"
         )
         spent = await conn.fetchval(
-            "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions WHERE amount < 0"
+            "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions WHERE amount < 0 AND description <> 'Ручное списание администратором'"
         )
         topups_today = await conn.fetchval(
             "SELECT COALESCE(SUM(amount), 0) FROM nobody_topups "
@@ -1161,7 +1161,7 @@ async def stats_earnings(callback: CallbackQuery):
         )
         spent_today = await conn.fetchval(
             "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions "
-            "WHERE amount < 0 AND created_at >= CURRENT_DATE"
+            "WHERE amount < 0 AND description <> 'Ручное списание администратором' AND created_at >= CURRENT_DATE"
         )
     await callback.answer()
     if callback.message:
