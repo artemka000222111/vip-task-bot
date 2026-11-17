@@ -789,7 +789,12 @@ async def withdraw_amount(message: Message, state: FSMContext):
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
         if amount < Decimal("100") or amount > Decimal("1000000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи сумму от 100 ₽."); return
+        await message.answer(
+            "Введи сумму от 100 ₽.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
+            ])
+        ); return
     if await get_balance(message.from_user.id) < amount:
         await state.clear()
         await message.answer("Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
