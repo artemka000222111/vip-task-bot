@@ -595,6 +595,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
         except ValueError:
             referrer_id = 0
         referral_bonus = None
+        new_referral_id = None
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 if referrer_id and referrer_id != message.from_user.id:
@@ -606,6 +607,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                         message.from_user.id, referrer_id
                     )
                     if linked_referrer:
+                        new_referral_id = linked_referrer
                         bonus_enabled = await conn.fetchval(
                             "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
                         )
@@ -629,26 +631,28 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                                 referral_bonus = (linked_referrer, bonus_amount)
                 else:
                     await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
-        if referral_bonus:
-            referrer_id, credited_amount = referral_bonus
+        if new_referral_id:
             async with db_pool.acquire() as conn:
                 referrer_info = await conn.fetchrow(
                     "SELECT username, first_name FROM nobody_users WHERE telegram_id=$1",
-                    referrer_id
+                    new_referral_id
                 )
             referred_name = " ".join(part for part in [message.from_user.first_name, message.from_user.last_name] if part) or "Без имени"
             referred_username = f"@{message.from_user.username}" if message.from_user.username else "username не указан"
             referrer_name = (referrer_info["first_name"] or "Без имени") if referrer_info else "Неизвестно"
             referrer_username = f"@{referrer_info['username']}" if referrer_info and referrer_info["username"] else "username не указан"
+            bonus_line = f"💰 Начислен бонус: {referral_bonus[1]:g} ₽" if referral_bonus else "Бонус за регистрацию не начислялся"
             await notify_admin_event(
                 bot,
-                "👥 НОВЫЙ РЕФЕРАЛ\\n\\n"
-                f"Пригласивший: {referrer_name} ({referrer_username})\\n"
-                f"ID пригласившего: {referrer_id}\\n"
-                f"Новый пользователь: {referred_name} ({referred_username})\\n"
-                f"ID нового пользователя: {message.from_user.id}\\n"
-                f"💰 Начислен бонус: {credited_amount:g} ₽"
+                "👥 НОВЫЙ РЕФЕРАЛ\n\n"
+                f"Пригласивший: {referrer_name} ({referrer_username})\n"
+                f"ID пригласившего: {new_referral_id}\n"
+                f"Новый пользователь: {referred_name} ({referred_username})\n"
+                f"ID нового пользователя: {message.from_user.id}\n"
+                f"{bonus_line}"
             )
+        if referral_bonus:
+            referrer_id, credited_amount = referral_bonus
             try:
                 await bot.send_message(
                     referrer_id,
@@ -960,9 +964,9 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
             buyer_username = f"@{callback.from_user.username}" if callback.from_user.username else "username не указан"
             await notify_admin_event(
                 bot,
-                "💌 ПОКУПКА ОТКРЫТКИ\\n\\n"
-                f"Пользователь: {buyer_name} ({buyer_username})\\n"
-                f"Telegram ID: {sender_id}\\n"
+                "💌 ПОКУПКА ОТКРЫТКИ\n\n"
+                f"Пользователь: {buyer_name} ({buyer_username})\n"
+                f"Telegram ID: {sender_id}\n"
                 f"Сумма покупки: {card_price:.2f} ₽"
             )
         if paid_card and referral_commission:
@@ -1142,10 +1146,10 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
             buyer_username = f"@{callback.from_user.username}" if callback.from_user.username else "username не указан"
             await notify_admin_event(
                 bot,
-                "🔎 ПОКУПКА РАСКРЫТИЯ ЛИЧНОСТИ\\n\\n"
-                f"Пользователь: {buyer_name} ({buyer_username})\\n"
-                f"Telegram ID: {user_id}\\n"
-                f"Сумма покупки: {reveal_price:.2f} ₽\\n"
+                "🔎 ПОКУПКА РАСКРЫТИЯ ЛИЧНОСТИ\n\n"
+                f"Пользователь: {buyer_name} ({buyer_username})\n"
+                f"Telegram ID: {user_id}\n"
+                f"Сумма покупки: {reveal_price:.2f} ₽\n"
                 f"Сообщение №{message_id}"
             )
         if not already_revealed and referral_commission:
@@ -2287,7 +2291,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             )
         status = "ВКЛЮЧЕНЫ" if new_value == "true" else "ВЫКЛЮЧЕНЫ"
         if callback.message:
-            await replace_callback_message(callback, f"🔔 Уведомления о событиях {status}.\\n\\nОткрой админ-панель ещё раз, чтобы увидеть обновлённый переключатель.")
+            await replace_callback_message(callback, f"🔔 Уведомления о событиях {status}.\n\nОткрой админ-панель ещё раз, чтобы увидеть обновлённый переключатель.")
     elif action == "restore_menu":
         async with db_pool.acquire() as conn:
             user_ids = await conn.fetch("SELECT telegram_id FROM nobody_users ORDER BY telegram_id")
@@ -2310,8 +2314,8 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             await asyncio.sleep(0.05)
         if callback.message:
             await callback.message.answer(
-                "✅ ВОССТАНОВЛЕНИЕ ЗАВЕРШЕНО\\n\\n"
-                f"📨 Меню отправлено: {sent_count}\\n"
+                "✅ ВОССТАНОВЛЕНИЕ ЗАВЕРШЕНО\n\n"
+                f"📨 Меню отправлено: {sent_count}\n"
                 f"⚠️ Не удалось доставить: {failed_count}"
             )
     elif action == "broadcast":
@@ -2319,7 +2323,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.broadcast_text)
         if callback.message:
             await replace_callback_message(callback,
-                "📢 РАССЫЛКА\\n\\nОтправь текст, который нужно разослать всем пользователям бота.\\n"
+                "📢 РАССЫЛКА\n\nОтправь текст, который нужно разослать всем пользователям бота.\n"
                 "Можно использовать эмодзи. Для отмены открой админ-панель."
             )
 
