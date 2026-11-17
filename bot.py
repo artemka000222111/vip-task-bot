@@ -417,8 +417,18 @@ async def init_database() -> None:
             )
             if migrated:
                 legacy_rows = await conn.fetch(
-                    """SELECT partner_id, SUM(amount) AS available
-                       FROM nobody_partner_ledger GROUP BY partner_id HAVING SUM(amount)>0"""
+                    """SELECT u.telegram_id AS partner_id,
+                              COALESCE(l.available,0)+COALESCE(p.pending,0) AS available
+                       FROM nobody_users u
+                       LEFT JOIN (
+                           SELECT partner_id,SUM(amount) AS available
+                           FROM nobody_partner_ledger GROUP BY partner_id
+                       ) l ON l.partner_id=u.telegram_id
+                       LEFT JOIN (
+                           SELECT user_id,SUM(amount) AS pending
+                           FROM nobody_partner_withdrawals WHERE status='pending' GROUP BY user_id
+                       ) p ON p.user_id=u.telegram_id
+                       WHERE COALESCE(l.available,0)+COALESCE(p.pending,0)>0"""
                 )
                 for legacy in legacy_rows:
                     amount = Decimal(legacy["available"]).quantize(Decimal("0.01"))
@@ -435,6 +445,9 @@ async def init_database() -> None:
                             "UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1",
                             legacy["partner_id"], amount
                         )
+                await conn.execute(
+                    "UPDATE nobody_partner_withdrawals SET status='rejected',reviewed_at=NOW() WHERE status='pending'"
+                )
             await conn.execute(
                 """INSERT INTO nobody_settings (key,value) VALUES ('min_withdraw_amount','10')
                    ON CONFLICT (key) DO UPDATE SET value='10'"""
@@ -2445,7 +2458,11 @@ async def stats_earnings(callback: CallbackQuery):
                WHERE amount<0 AND (description='Покупка открытки-сердечка' OR description LIKE 'Раскрытие автора%')"""
         )
         purchase_partner_commissions = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE kind='commission'"
+            """SELECT
+                 COALESCE((SELECT SUM(amount) FROM nobody_partner_ledger WHERE kind='commission'),0)
+                 + COALESCE((SELECT SUM(amount) FROM nobody_transactions
+                     WHERE amount>0 AND (description LIKE 'Комиссия за покупку%'
+                                         OR description LIKE 'Комиссия за раскрытие%')),0)"""
         )
         approved_withdrawal_fees = await conn.fetchval(
             """SELECT COALESCE(SUM(amount*commission_percent/100),0)
