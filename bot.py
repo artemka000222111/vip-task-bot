@@ -723,8 +723,7 @@ async def support_start(callback: CallbackQuery, state: FSMContext):
         await state.set_state(SupportFlow.user_reply)
         if callback.message:
             await callback.message.answer(
-                f"У тебя уже есть открытый диалог с поддержкой №{ticket_id}. Можешь продолжить его.",
-                reply_markup=support_user_keyboard(ticket_id)
+                f"У тебя уже есть открытый диалог с поддержкой №{ticket_id}. Если поддержка ответит, здесь появится кнопка для ответа."
             )
     else:
         await state.set_state(SupportFlow.new_text)
@@ -760,8 +759,7 @@ async def support_new_text(message: Message, state: FSMContext, bot: Bot):
         await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
     await state.set_state(SupportFlow.user_reply)
     await message.answer(
-        f"✅ Обращение №{ticket_id} отправлено администрации.",
-        reply_markup=support_user_keyboard(ticket_id)
+        f"✅ Обращение №{ticket_id} отправлено администрации. Ожидай ответа поддержки."
     )
     try:
         await notify_admin_support(bot, ticket_id, message.from_user.id, body, True)
@@ -804,7 +802,7 @@ async def support_user_reply(message: Message, state: FSMContext, bot: Bot):
                 ticket_id, message.from_user.id, body
             )
             await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
-    await message.answer("✅ Сообщение отправлено администрации.", reply_markup=support_user_keyboard(ticket_id))
+    await message.answer("✅ Сообщение отправлено администрации. Ожидай ответа поддержки.")
     try:
         await notify_admin_support(bot, ticket_id, message.from_user.id, body)
     except Exception:
