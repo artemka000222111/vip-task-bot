@@ -4,7 +4,7 @@ import os
 from decimal import Decimal, InvalidOperation
 
 import asyncpg
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -133,9 +133,11 @@ async def init_database() -> None:
             CREATE TABLE IF NOT EXISTS nobody_users (
                 telegram_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT NOT NULL DEFAULT '',
                 last_name TEXT, balance NUMERIC(12,2) NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_messages (
                 id BIGSERIAL PRIMARY KEY,
@@ -213,8 +215,22 @@ async def save_user(user) -> None:
             INSERT INTO nobody_users (telegram_id, username, first_name, last_name)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username,
-                first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name
+                first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
+                last_active_at=NOW()
         """, user.id, user.username, user.first_name or "", user.last_name)
+
+class ActivityMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if user is None:
+            message = getattr(event, "message", None)
+            callback = getattr(event, "callback_query", None)
+            user = (message.from_user if message else None) or (callback.from_user if callback else None)
+        if user is not None:
+            await save_user(user)
+        return await handler(event, data)
+
+dp.update.outer_middleware(ActivityMiddleware())
 
 async def is_admin(user_id: int | None) -> bool:
     return user_id == ADMIN_ID
@@ -245,15 +261,16 @@ async def change_balance(user_id: int, amount: Decimal, description: str, ref: s
                 await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", user_id, amount)
     return True
 
-def message_actions_keyboard(message_id: int) -> InlineKeyboardMarkup:
+async def message_actions_keyboard(message_id: int) -> InlineKeyboardMarkup:
+    reveal_price = await get_price("reveal_price")
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"msg:reply:{message_id}")],
-        [InlineKeyboardButton(text="🔎 Раскрыть личность — 50 ₽", callback_data=f"msg:reveal:{message_id}")],
+        [InlineKeyboardButton(text=f"🔎 Раскрыть личность — {reveal_price:.2f} ₽", callback_data=f"msg:reveal:{message_id}")],
     ])
 
 async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, body: str, message_id: int, postcard: bool):
     text = f"💌 Новая анонимка!\n\n{CATEGORIES.get(category, CATEGORIES['other'])}\n\n{body}\n\nСообщение #{message_id}"
-    markup = message_actions_keyboard(message_id)
+    markup = await message_actions_keyboard(message_id)
     try:
         if postcard:
             async with db_pool.acquire() as conn:
@@ -703,6 +720,8 @@ async def help_message(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆘 Обратиться в поддержку", callback_data="support:start")]
     ])
+    card_price = await get_price("card_price")
+    reveal_price = await get_price("reveal_price")
     await message.answer(
         "💜 VIP NOBODY — место для анонимных признаний\n\n"
         "Здесь можно отправлять людям анонимные сообщения, признаваться в чувствах, "
@@ -713,8 +732,8 @@ async def help_message(message: Message):
         "3. Получай анонимные сообщения.\n"
         "4. Отвечай отправителям анонимно.\n\n"
         "Дополнительные возможности:\n"
-        "❤️ Фирменная открытка к сообщению — 10 ₽.\n"
-        "🔎 Раскрытие личности отправителя — 50 ₽.\n\n"
+        f"❤️ Фирменная открытка к сообщению — {card_price:.2f} ₽.\n"
+        f"🔎 Раскрытие личности отправителя — {reveal_price:.2f} ₽.\n\n"
         "Если возник вопрос или проблема — напиши в поддержку.",
         reply_markup=kb
     )
@@ -1094,11 +1113,65 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
     elif action == "stats":
-        async with db_pool.acquire() as conn:
-            users = await conn.fetchval("SELECT COUNT(*) FROM nobody_users")
-            msgs = await conn.fetchval("SELECT COUNT(*) FROM nobody_messages")
-            total = await conn.fetchval("SELECT COALESCE(SUM(balance),0) FROM nobody_users")
-        if callback.message: await callback.message.answer(f"📊 Статистика\nПользователей: {users}\nСообщений: {msgs}\nБалансов пользователей: {total:.2f} ₽")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Люди", callback_data="stats:people")],
+            [InlineKeyboardButton(text="💰 Заработок", callback_data="stats:earnings")],
+        ])
+        if callback.message:
+            await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
+
+
+@dp.callback_query(F.data == "stats:people")
+async def stats_people(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM nobody_users")
+        week = await conn.fetchval(
+            "SELECT COUNT(*) FROM nobody_users WHERE last_active_at >= NOW() - INTERVAL '7 days'"
+        )
+        today = await conn.fetchval(
+            "SELECT COUNT(*) FROM nobody_users WHERE last_active_at >= CURRENT_DATE"
+        )
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            f"👥 ЛЮДИ\\n\\n"
+            f"Всего людей: {total}\\n"
+            f"Активность за неделю: {week}\\n"
+            f"Активность сегодня: {today}"
+        )
+
+@dp.callback_query(F.data == "stats:earnings")
+async def stats_earnings(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    async with db_pool.acquire() as conn:
+        balance = await conn.fetchval(
+            "SELECT COALESCE(SUM(balance), 0) FROM nobody_users"
+        )
+        spent = await conn.fetchval(
+            "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions WHERE amount < 0"
+        )
+        topups_today = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount), 0) FROM nobody_topups "
+            "WHERE status='approved' AND reviewed_at >= CURRENT_DATE"
+        )
+        spent_today = await conn.fetchval(
+            "SELECT COALESCE(-SUM(amount), 0) FROM nobody_transactions "
+            "WHERE amount < 0 AND created_at >= CURRENT_DATE"
+        )
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            f"💰 ЗАРАБОТОК\\n\\n"
+            f"Общий баланс людей: {Decimal(balance):.2f} ₽\\n"
+            f"Всего потрачено: {Decimal(spent):.2f} ₽\\n\\n"
+            f"Пополнения за сегодня: {Decimal(topups_today):.2f} ₽\\n"
+            f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
+        )
 
 @dp.callback_query(F.data.in_({"price:card", "price:reveal"}))
 async def admin_price_start(callback: CallbackQuery, state: FSMContext):
