@@ -918,7 +918,6 @@ async def partner_cabinet(message: Message, bot: Bot):
 async def partner_analytics(callback: CallbackQuery):
     uid = callback.from_user.id
     async with db_pool.acquire() as conn:
-        balance = await get_partner_balance(uid, conn)
         invited = await conn.fetchval(
             "SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1", uid
         )
@@ -926,13 +925,17 @@ async def partner_analytics(callback: CallbackQuery):
             "SELECT COUNT(*) FROM nobody_users WHERE referred_by=$1 "
             "AND last_active_at >= NOW()-INTERVAL '30 days'", uid
         )
+        earned = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger "
+            "WHERE partner_id=$1 AND kind IN ('commission','withdrawal_commission')", uid
+        )
     await callback.answer()
     if callback.message:
         await callback.message.answer(
             "📊 ТВОЯ АНАЛИТИКА\n\n"
             f"👥 Всего рефералов: {invited}\n"
             f"🟢 Активных за 30 дней: {active}\n"
-            f"💰 Всего заработано: {balance:.2f} ₽"
+            f"💰 Всего заработано: {Decimal(earned or 0):.2f} ₽"
         )
 
 
@@ -942,8 +945,8 @@ async def partner_howto(callback: CallbackQuery):
     if callback.message:
         await callback.message.answer(
             "📖 КАК ЭТО РАБОТАЕТ?\n\n"
-            "1. Нажми «Моя ссылка» и отправь её друзьям.\n"
-            "2. Когда друг зарегистрируется по ссылке, он станет твоим рефералом.\n"
+            "1. Нажми «Поделиться ссылкой» в этом разделе.\n"
+            "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
             "3. Получай процент с его операций:\n\n"
             "💌 Покупка открытки — 10%\n"
             "🔎 Раскрытие личности — 10%\n"
