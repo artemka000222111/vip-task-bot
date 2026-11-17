@@ -1469,7 +1469,6 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
-        [InlineKeyboardButton(text="🧹 Сбросить тестовые данные", callback_data="admin:reset_stats")],
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
@@ -1501,36 +1500,6 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         ])
         if callback.message:
             await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
-
-    elif action == "reset_stats":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Да, обнулить всё", callback_data="admin:reset_confirm")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin:reset_cancel")],
-        ])
-        if callback.message:
-            await callback.message.answer(
-                "⚠️ СБРОС ТЕСТОВЫХ ДАННЫХ\n\n"
-                "У всех пользователей, включая администратора, баланс станет 0 ₽.\n"
-                "История тестовых пополнений и списаний будет очищена из аналитики.\n\n"
-                "Пользователи, сообщения, подарки и обращения в поддержку останутся.\n\n"
-                "Подтверди сброс:", reply_markup=kb
-            )
-    elif action == "reset_cancel":
-        if callback.message:
-            await callback.message.answer("Сброс отменён. Данные не изменены.")
-    elif action == "reset_confirm":
-        async with db_pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("UPDATE nobody_users SET balance=0")
-                await conn.execute("DELETE FROM nobody_transactions")
-                await conn.execute("DELETE FROM nobody_topups")
-        if callback.message:
-            await callback.message.answer(
-                "✅ Тестовые данные обнулены.\n\n"
-                "Балансы всех пользователей: 0 ₽\n"
-                "История пополнений и трат: очищена.\n"
-                "Пользователи и переписки сохранены."
-            )
 
     elif action == "top_active":
         async with db_pool.acquire() as conn:
