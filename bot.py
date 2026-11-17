@@ -95,6 +95,7 @@ def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
         [KeyboardButton(text="💼 Мой заработок")],
         [KeyboardButton(text="ℹ️ Помощь")],
+        [KeyboardButton(text="⬅️ Главное меню")],
     ]
     if is_admin:
         rows.append([KeyboardButton(text="🛠 Админ-панель")])
@@ -161,9 +162,62 @@ async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
 async def send_flow_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
                             reply_markup=None) -> Message:
     await clear_flow_message(bot, chat_id, state)
-    sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    sent = await bot.send_message(chat_id, text, reply_markup=add_menu_back_button(reply_markup))
     await state.update_data(flow_bot_message_id=sent.message_id)
     return sent
+
+def add_menu_back_button(reply_markup):
+    if reply_markup is None:
+        return None
+    rows = [list(row) for row in reply_markup.inline_keyboard]
+    if not any(
+        button.callback_data == "nav:home"
+        for row in rows for button in row
+    ):
+        rows.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="nav:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def replace_callback_message(callback: CallbackQuery, text: str, reply_markup=None, **kwargs):
+    """Keep callback navigation in one bot message instead of stacking new messages."""
+    old_message = callback.message
+    if old_message is None:
+        return None
+    markup = add_menu_back_button(reply_markup)
+    try:
+        return await old_message.edit_text(text, reply_markup=markup, **kwargs)
+    except Exception:
+        try:
+            await old_message.delete()
+        except Exception:
+            pass
+        return await callback.bot.send_message(
+            chat_id=callback.from_user.id,
+            text=text,
+            reply_markup=markup,
+            **kwargs
+        )
+
+
+class FlowInputCleanupMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        state = data.get("state")
+        active_flow = False
+        if state is not None:
+            try:
+                active_flow = await state.get_state() is not None
+            except Exception:
+                active_flow = False
+        result = await handler(event, data)
+        if active_flow and isinstance(event, Message) and event.chat.type == "private":
+            try:
+                await event.delete()
+            except Exception:
+                log.debug("Could not delete flow input message %s", event.message_id)
+        return result
+
+
+dp.message.middleware(FlowInputCleanupMiddleware())
 
 async def init_database() -> None:
     global db_pool
@@ -521,7 +575,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
             if gift_photo:
                 sent = await callback.message.answer_photo(gift_photo, caption=caption, reply_markup=kb)
             else:
-                sent = await callback.message.answer(caption, reply_markup=kb)
+                sent = await replace_callback_message(callback, caption, reply_markup=kb)
             await state.update_data(flow_bot_message_id=sent.message_id)
         return
     await state.set_state(AnonymousFlow.text)
@@ -558,7 +612,7 @@ async def gift_resume(callback: CallbackQuery, state: FSMContext):
     await state.set_state(GiftFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("🎁 Возвращаемся к подарку!\nУкажи сумму от 10 до 5 000 ₽:")
+        await replace_callback_message(callback, "🎁 Возвращаемся к подарку!\nУкажи сумму от 10 до 5 000 ₽:")
 
 @dp.message(GiftFlow.amount)
 async def gift_amount(message: Message, state: FSMContext):
@@ -635,7 +689,7 @@ async def gift_cancel(callback: CallbackQuery, state: FSMContext):
         await conn.execute("DELETE FROM nobody_pending_gifts WHERE sender_id=$1", callback.from_user.id)
     await state.clear()
     await callback.answer("Подарок отменён.")
-    if callback.message: await callback.message.answer("Подарок отменён. Можешь отправить обычное сообщение.")
+    if callback.message: await replace_callback_message(callback, "Подарок отменён. Можешь отправить обычное сообщение.")
 
 @dp.callback_query(F.data.startswith("gift:visibility:"))
 async def gift_visibility(callback: CallbackQuery, state: FSMContext):
@@ -646,7 +700,7 @@ async def gift_visibility(callback: CallbackQuery, state: FSMContext):
     await state.set_state(GiftFlow.text)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Напиши текст, который будет приложен к денежному подарку:")
+        await replace_callback_message(callback, "Напиши текст, который будет приложен к денежному подарку:")
 
 
 @dp.callback_query(F.data == "card:choose")
@@ -762,7 +816,7 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
                 log.exception("Could not notify referral partner %s", referral_commission[0])
         await callback.answer("Сообщение отправлено!")
         if callback.message:
-            await callback.message.answer(
+            await replace_callback_message(callback, 
                 "✅ Анонимное сообщение отправлено!" + (f" Открытка куплена за {card_price:.2f} ₽." if paid_card else ""),
                 reply_markup=main_keyboard(await is_admin(sender_id)))
         await send_message_to_recipient(bot, recipient_id, category, body, row["id"], paid_card, data.get("selected_postcard", "heart"))
@@ -771,7 +825,7 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
             await state.clear()
             await callback.answer()
             if callback.message:
-                await callback.message.answer(
+                await replace_callback_message(callback, 
                     "Недостаточно средств. Пополни баланс, чтобы купить открытку.",
                     reply_markup=insufficient_balance_keyboard()
                 )
@@ -788,6 +842,35 @@ async def buy_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
 @dp.callback_query(F.data == "card:free")
 async def send_without_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await finish_anonymous(callback, state, bot, False)
+
+@dp.message(F.text == "⬅️ Главное меню")
+async def return_to_main_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
+        reply_markup=main_keyboard(await is_admin(message.from_user.id))
+    )
+
+
+@dp.callback_query(F.data == "nav:home")
+async def callback_return_to_main_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer()
+    await replace_callback_message(
+        callback,
+        "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
+        reply_markup=None
+    )
+    if callback.message:
+        try:
+            await callback.bot.send_message(
+                callback.from_user.id,
+                "Используй кнопки меню ниже.",
+                reply_markup=main_keyboard(await is_admin(callback.from_user.id))
+            )
+        except Exception:
+            pass
+
 
 @dp.message(F.text == "🔗 Моя ссылка")
 async def my_link(message: Message, bot: Bot):
@@ -819,7 +902,7 @@ async def begin_message_reply(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ReplyFlow.text)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Напиши ответ. Он будет отправлен автору анонимно:")
+        await replace_callback_message(callback, "Напиши ответ. Он будет отправлен автору анонимно:")
 
 @dp.message(ReplyFlow.text)
 async def send_anonymous_reply(message: Message, state: FSMContext, bot: Bot):
@@ -914,7 +997,7 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
         )
         if callback.message:
             if not already_revealed:
-                await callback.message.answer(
+                await replace_callback_message(callback, 
                     f"💸 Списано с баланса: {reveal_price:.2f} ₽\n"
                     f"Остаток на балансе: {balance_after:.2f} ₽"
                 )
@@ -924,15 +1007,15 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                     photo_file_id = photos.photos[0][-1].file_id
                     await callback.message.answer_photo(photo_file_id, caption=result_text)
                 else:
-                    await callback.message.answer(result_text)
+                    await replace_callback_message(callback, result_text)
             except Exception:
                 log.exception("Could not fetch profile photo for revealed author %s", row["sender_id"])
-                await callback.message.answer(result_text)
+                await replace_callback_message(callback, result_text)
     except ValueError as exc:
         if "Недостаточно средств" in str(exc):
             await callback.answer()
             if callback.message:
-                await callback.message.answer(
+                await replace_callback_message(callback, 
                     "Недостаточно средств. Пополни баланс, чтобы раскрыть личность.",
                     reply_markup=insufficient_balance_keyboard()
                 )
@@ -988,7 +1071,7 @@ async def partner_analytics(callback: CallbackQuery):
         )
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "📊 ТВОЯ АНАЛИТИКА\n\n"
             f"👥 Всего рефералов: {invited}\n"
             f"🟢 Активных за 30 дней: {active}\n"
@@ -1021,7 +1104,7 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             if bonus_enabled else
             "Начисления за покупки поступают сразу, за одобренный вывод — после подтверждения заявки."
         )
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "📖 КАК ЭТО РАБОТАЕТ?\n\n"
             "1. Нажми «Поделиться ссылкой» под этим сообщением.\n"
             "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
@@ -1043,7 +1126,7 @@ async def partner_share(callback: CallbackQuery, bot: Bot):
     link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "🔗 Твоя реферальная ссылка:\n" + link,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📨 Поделиться", url=f"https://t.me/share/url?url={link}")],
@@ -1061,7 +1144,7 @@ async def partner_withdraw_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(PartnerWithdrawFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "📤 ВЫВОД ПАРТНЁРСКОГО ЗАРАБОТКА\n\n"
             "Вывод доступен только через СБП.\n"
             "Понадобятся номер телефона, привязанный к СБП, и название банка.\n\n"
@@ -1230,7 +1313,7 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
             referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", callback.from_user.id)
         project_percent = Decimal("5") if referrer_id else Decimal("10")
         partner_percent = Decimal("5") if referrer_id else Decimal("0")
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             f"💸 Вывод средств\n\nКомиссия проекта: {project_percent:.0f}%"
             + (f"\nКомиссия рефереру: {partner_percent:.0f}%" if partner_percent else "")
             + "\nНа карту поступит 90% от суммы вывода. Комиссии начисляются после одобрения заявки.\n\n"
@@ -1480,7 +1563,7 @@ async def topup_cancel(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await state.clear()
     await callback.answer("Пополнение отменено.")
     if callback.message:
-        await callback.message.answer("❌ Пополнение отменено.")
+        await replace_callback_message(callback, "❌ Пополнение отменено.")
 
 @dp.callback_query(F.data == "topup:sent")
 async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -1502,7 +1585,7 @@ async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await state.clear()
     await callback.answer("Заявка отправлена администратору!")
     if callback.message:
-        await callback.message.answer("✅ Заявка на пополнение отправлена. Баланс будет зачислен после проверки оплаты.")
+        await replace_callback_message(callback, "✅ Заявка на пополнение отправлена. Баланс будет зачислен после проверки оплаты.")
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"topup:approve:{topup_id}"),
          InlineKeyboardButton(text="❌ Отклонить", callback_data=f"topup:reject:{topup_id}")]
@@ -1542,7 +1625,7 @@ async def topup_approve(callback: CallbackQuery, bot: Bot):
     await callback.answer("Пополнение подтверждено.")
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
+        await replace_callback_message(callback, f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
     pending_gift = None
     try:
         async with db_pool.acquire() as conn:
@@ -1597,7 +1680,7 @@ async def topup_reject(callback: CallbackQuery, bot: Bot):
     await callback.answer("Заявка отклонена.")
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(f"❌ Заявка №{topup_id} отклонена.")
+        await replace_callback_message(callback, f"❌ Заявка №{topup_id} отклонена.")
     try:
         await bot.send_message(row["user_id"], f"❌ Заявка на пополнение №{topup_id} отклонена. Если считаешь это ошибкой, обратись в поддержку.")
     except Exception:
@@ -1684,20 +1767,20 @@ async def support_start(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     if blocked:
         if callback.message:
-            await callback.message.answer("Обращения в поддержку для твоего аккаунта временно недоступны.")
+            await replace_callback_message(callback, "Обращения в поддержку для твоего аккаунта временно недоступны.")
         return
     await state.clear()
     await state.update_data(support_ticket_id=ticket_id)
     if ticket:
         await state.set_state(SupportFlow.user_reply)
         if callback.message:
-            await callback.message.answer(
+            await replace_callback_message(callback, 
                 "У тебя уже есть открытый диалог с поддержкой. Если поддержка ответит, здесь появится кнопка для ответа."
             )
     else:
         await state.set_state(SupportFlow.new_text)
         if callback.message:
-            await callback.message.answer("Опиши проблему или вопрос одним сообщением. Текст будет передан администрации.")
+            await replace_callback_message(callback, "Опиши проблему или вопрос одним сообщением. Текст будет передан администрации.")
 
 async def notify_admin_support(bot: Bot, ticket_id: int, user_id: int, body: str, first: bool = False):
     async with db_pool.acquire() as conn:
@@ -1749,7 +1832,7 @@ async def support_user_reply_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.user_reply)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Напиши сообщение для администрации:")
+        await replace_callback_message(callback, "Напиши сообщение для администрации:")
 
 @dp.message(SupportFlow.user_reply)
 async def support_user_reply(message: Message, state: FSMContext, bot: Bot):
@@ -1793,7 +1876,7 @@ async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.admin_reply)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи ответ пользователю:")
+        await replace_callback_message(callback, "Введи ответ пользователю:")
 
 @dp.message(SupportFlow.admin_reply)
 async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
@@ -1843,7 +1926,7 @@ async def support_user_close(callback: CallbackQuery, bot: Bot):
     await callback.answer("Диалог завершён.")
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer("🔒 Ты завершил диалог с поддержкой.")
+        await replace_callback_message(callback, "🔒 Ты завершил диалог с поддержкой.")
     try:
         await bot.send_message(
             ADMIN_ID,
@@ -1884,7 +1967,7 @@ async def support_direct_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.direct_target)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Введи Telegram ID или @username пользователя. Он должен ранее запустить бота.")
+        await replace_callback_message(callback, "Введи Telegram ID или @username пользователя. Он должен ранее запустить бота.")
 
 @dp.message(SupportFlow.direct_target)
 async def support_direct_target(message: Message, state: FSMContext):
@@ -1940,7 +2023,7 @@ async def support_block_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.block_target)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "Введи Telegram ID или @username для блокировки. Чтобы снять запрет, введи: unblock ID или unblock @username."
         )
 
@@ -2033,7 +2116,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
     if action in ("credit", "debit"):
         await state.update_data(balance_action=action)
         await state.set_state(AdminFlow.balance_user)
-        if callback.message: await callback.message.answer("Отправь Telegram ID пользователя.")
+        if callback.message: await replace_callback_message(callback, "Отправь Telegram ID пользователя.")
     elif action == "prices":
         async with db_pool.acquire() as conn:
             card_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='card_price'")
@@ -2051,14 +2134,14 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text=f"💸 Минимальный вывод: {min_withdraw_label}", callback_data="price:min_withdraw")],
         ])
         if callback.message:
-            await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
+            await replace_callback_message(callback, "💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
     elif action == "stats":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👥 Люди", callback_data="stats:people")],
             [InlineKeyboardButton(text="💰 Заработок", callback_data="stats:earnings")],
         ])
         if callback.message:
-            await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
+            await replace_callback_message(callback, "📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
 
     elif action == "referrals":
         async with db_pool.acquire() as conn:
@@ -2083,7 +2166,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="💰 Изменить сумму бонуса", callback_data="referrals:amount")]
         ])
         if callback.message:
-            await callback.message.answer(
+            await replace_callback_message(callback, 
                 "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
                 f"Статус бонуса {amount:g} ₽: {status}\n"
                 f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
@@ -2103,7 +2186,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             )
         if callback.message:
             if not users:
-                await callback.message.answer("Пока нет активных пользователей.")
+                await replace_callback_message(callback, "Пока нет активных пользователей.")
             else:
                 lines = ["🏆 ТОП 10 АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ\n"]
                 for index, user in enumerate(users, 1):
@@ -2111,17 +2194,17 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
                     name = user["first_name"] or "Без имени"
                     active_at = user["last_active_at"].strftime("%d.%m.%Y %H:%M")
                     lines.append(f"{index}. {username} — {name}\n   Действий: {user['activity_count']} · Последняя активность: {active_at}")
-                await callback.message.answer("\n".join(lines))
+                await replace_callback_message(callback, "\n".join(lines))
     elif action == "view_messages":
         await state.clear()
         await state.set_state(AdminFlow.message_view_user)
         if callback.message:
-            await callback.message.answer("Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
+            await replace_callback_message(callback, "Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
     elif action == "broadcast":
         await state.clear()
         await state.set_state(AdminFlow.broadcast_text)
         if callback.message:
-            await callback.message.answer(
+            await replace_callback_message(callback, 
                 "📢 РАССЫЛКА\n\nОтправь текст, который нужно разослать всем пользователям бота.\n"
                 "Можно использовать эмодзи. Для отмены открой админ-панель."
             )
@@ -2136,7 +2219,7 @@ async def admin_referrals_amount_start(callback: CallbackQuery, state: FSMContex
     await state.set_state(AdminFlow.referral_bonus_amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "💰 Введи новую сумму бонуса за одного нового реферала в рублях.\n"
             "Например: 2 или 2.50"
         )
@@ -2229,7 +2312,7 @@ async def admin_referrals_toggle(callback: CallbackQuery):
             await callback.message.edit_reply_markup(reply_markup=kb)
         except Exception:
             pass
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
             f"Статус бонуса {amount:g} ₽: {status}\n"
             f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
@@ -2276,7 +2359,7 @@ async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot
         await state.clear()
         await callback.answer("Рассылка отменена.")
         if callback.message:
-            await callback.message.answer("❌ Рассылка отменена.")
+            await replace_callback_message(callback, "❌ Рассылка отменена.")
         return
 
     if await state.get_state() != AdminFlow.broadcast_confirm.state:
@@ -2293,7 +2376,7 @@ async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot
     await callback.answer("Рассылка запущена.")
     status_message = None
     if callback.message:
-        status_message = await callback.message.answer("⏳ Рассылка выполняется. Это может занять некоторое время...")
+        status_message = await replace_callback_message(callback, "⏳ Рассылка выполняется. Это может занять некоторое время...")
 
     async with db_pool.acquire() as conn:
         user_ids = await conn.fetch("SELECT telegram_id FROM nobody_users ORDER BY telegram_id")
@@ -2320,7 +2403,7 @@ async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot
         try:
             await status_message.edit_text(report)
         except Exception:
-            await callback.message.answer(report)
+            await replace_callback_message(callback, report)
 
 
 @dp.message(AdminFlow.message_view_user)
@@ -2381,7 +2464,7 @@ async def stats_people(callback: CallbackQuery):
         )
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             f"👥 ЛЮДИ\n\n"
             f"Всего людей: {total}\n"
             f"Активность за неделю: {week}\n"
@@ -2426,7 +2509,7 @@ async def stats_earnings(callback: CallbackQuery):
         )
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await replace_callback_message(callback, 
             f"💰 ЗАРАБОТОК\n\n"
             f"Общий баланс людей: {Decimal(balance):.2f} ₽\n"
             f"Всего потрачено: {Decimal(spent):.2f} ₽\n"
@@ -2457,7 +2540,7 @@ async def admin_price_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFlow.price_value)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(f"Введи новую цену {title} в рублях:")
+        await replace_callback_message(callback, f"Введи новую цену {title} в рублях:")
 
 @dp.message(AdminFlow.price_value)
 async def admin_price_save(message: Message, state: FSMContext):
