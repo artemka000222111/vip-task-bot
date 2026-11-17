@@ -430,7 +430,7 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                         """UPDATE nobody_users SET referred_by=$2, referral_locked=TRUE
                            WHERE telegram_id=$1 AND referral_locked=FALSE AND referred_by IS NULL
                            AND EXISTS (SELECT 1 FROM nobody_users WHERE telegram_id=$2)
-                           RETURNING $2""",
+                           RETURNING referred_by""",
                         message.from_user.id, referrer_id
                     )
                     if linked_referrer:
