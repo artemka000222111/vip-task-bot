@@ -327,7 +327,7 @@ async def message_actions_keyboard(message_id: int) -> InlineKeyboardMarkup:
     ])
 
 async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, body: str, message_id: int, postcard: bool, postcard_key: str = "heart"):
-    text = f"💌 Новая анонимка!\n\n{CATEGORIES.get(category, CATEGORIES['other'])}\n\n{body}\n\nСообщение #{message_id}"
+    text = f"💌 Новая анонимка!\n\n{CATEGORIES.get(category, CATEGORIES['other'])}\n\n{body}"
     markup = await message_actions_keyboard(message_id)
     try:
         if postcard:
