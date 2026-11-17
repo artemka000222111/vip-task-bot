@@ -422,16 +422,42 @@ async def start(message: Message, state: FSMContext, bot: Bot):
             referrer_id = int(payload[4:])
         except ValueError:
             referrer_id = 0
+        referral_bonus = None
         async with db_pool.acquire() as conn:
-            if referrer_id and referrer_id != message.from_user.id:
-                await conn.execute(
-                    """UPDATE nobody_users SET referred_by=$2, referral_locked=TRUE
-                       WHERE telegram_id=$1 AND referral_locked=FALSE AND referred_by IS NULL
-                       AND EXISTS (SELECT 1 FROM nobody_users WHERE telegram_id=$2)""",
-                    message.from_user.id, referrer_id
+            async with conn.transaction():
+                if referrer_id and referrer_id != message.from_user.id:
+                    linked_referrer = await conn.fetchval(
+                        """UPDATE nobody_users SET referred_by=$2, referral_locked=TRUE
+                           WHERE telegram_id=$1 AND referral_locked=FALSE AND referred_by IS NULL
+                           AND EXISTS (SELECT 1 FROM nobody_users WHERE telegram_id=$2)
+                           RETURNING $2""",
+                        message.from_user.id, referrer_id
+                    )
+                    if linked_referrer:
+                        inserted = await conn.fetchval(
+                            """INSERT INTO nobody_partner_ledger
+                               (partner_id,source_user_id,amount,kind,description,ref)
+                               VALUES ($1,$2,1.00,'referral_bonus',$3,$4)
+                               ON CONFLICT (ref) DO NOTHING RETURNING id""",
+                            linked_referrer, message.from_user.id,
+                            "Бонус за нового реферала", f"referral-bonus:{message.from_user.id}"
+                        )
+                        if inserted:
+                            referral_bonus = linked_referrer
+                else:
+                    await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
+        if referral_bonus:
+            try:
+                await bot.send_message(
+                    referral_bonus,
+                    "🎉 У вас новый реферал!\n\n"
+                    "На ваш партнёрский баланс зачислен 1 ₽.\n\n"
+                    "Также вы получаете:\n"
+                    "💌 10% с каждой его покупки\n"
+                    "💸 5% с его вывода после одобрения заявки."
                 )
-            else:
-                await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
+            except Exception:
+                log.exception("Could not notify referrer %s about new referral", referral_bonus)
     else:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1 AND referral_locked=FALSE", message.from_user.id)
@@ -916,7 +942,7 @@ async def partner_cabinet(message: Message, bot: Bot):
     ])
     await message.answer(
         "💼 МОЙ ЗАРАБОТОК\n\n"
-        "Приглашай друзей по своей ссылке и получай процент с их покупок и выводов.",
+        "Приглашай друзей и получай 1 ₽ за каждого нового реферала, 10% с его покупок и 5% с одобренных выводов.",
         reply_markup=kb
     )
 
@@ -934,7 +960,7 @@ async def partner_analytics(callback: CallbackQuery):
         )
         earned = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger "
-            "WHERE partner_id=$1 AND kind IN ('commission','withdrawal_commission')", uid
+            "WHERE partner_id=$1 AND kind IN ('referral_bonus','commission','withdrawal_commission')", uid
         )
     await callback.answer()
     if callback.message:
@@ -957,11 +983,12 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             "📖 КАК ЭТО РАБОТАЕТ?\n\n"
             "1. Нажми «Поделиться ссылкой» под этим сообщением.\n"
             "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
-            "3. Получай процент с его операций:\n\n"
+            "3. Получай бонусы и процент с его операций:\n\n"
+            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\n"
             "💌 Покупка открытки — 10%\n"
             "🔎 Раскрытие личности — 10%\n"
             "💸 Одобренный вывод баланса — 5%\n\n"
-            "Начисления за покупки поступают сразу, за вывод — после одобрения заявки.",
+            "Бонус за реферала и начисления за покупки поступают сразу, за вывод — после одобрения заявки.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)]
             ])
