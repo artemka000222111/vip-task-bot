@@ -95,7 +95,6 @@ def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
         [KeyboardButton(text="💼 Мой заработок")],
         [KeyboardButton(text="ℹ️ Помощь")],
-        [KeyboardButton(text="⬅️ Главное меню")],
     ]
     if is_admin:
         rows.append([KeyboardButton(text="🛠 Админ-панель")])
