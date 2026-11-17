@@ -428,7 +428,7 @@ async def receive_text(message: Message, state: FSMContext):
 async def gift_resume(callback: CallbackQuery, state: FSMContext):
     async with db_pool.acquire() as conn:
         pending = await conn.fetchrow(
-            "SELECT recipient_id,body FROM nobody_pending_gifts WHERE sender_id=$1",
+            "SELECT recipient_id,body,anonymous FROM nobody_pending_gifts WHERE sender_id=$1",
             callback.from_user.id
         )
     if not pending:
