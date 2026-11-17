@@ -159,9 +159,11 @@ async def init_database() -> None:
                 user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                user_can_close BOOLEAN NOT NULL DEFAULT TRUE
             )
         """)
+        await conn.execute("ALTER TABLE nobody_support_tickets ADD COLUMN IF NOT EXISTS user_can_close BOOLEAN NOT NULL DEFAULT TRUE")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_support_messages (
                 id BIGSERIAL PRIMARY KEY,
@@ -676,6 +678,11 @@ def support_user_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔒 Завершить диалог", callback_data=f"support:user_close:{ticket_id}")]
     ])
 
+def support_user_reply_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Ответить администрации", callback_data=f"support:user_reply:{ticket_id}")]
+    ])
+
 def support_admin_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"support:admin_reply:{ticket_id}"),
@@ -839,7 +846,7 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
     ticket_id = (await state.get_data()).get("support_ticket_id")
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            ticket = await conn.fetchrow("SELECT user_id,status FROM nobody_support_tickets WHERE id=$1 FOR UPDATE", ticket_id)
+            ticket = await conn.fetchrow("SELECT user_id,status,user_can_close FROM nobody_support_tickets WHERE id=$1 FOR UPDATE", ticket_id)
             if not ticket or ticket["status"] != "open":
                 await state.clear()
                 await message.answer("Диалог уже закрыт.")
@@ -852,7 +859,7 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
     try:
         await bot.send_message(
             ticket["user_id"], f"💬 Ответ поддержки:\n\n{body}{SUPPORT_SIGNATURE}",
-            reply_markup=support_user_keyboard(ticket_id)
+            reply_markup=(support_user_keyboard(ticket_id) if ticket["user_can_close"] else support_user_reply_keyboard(ticket_id))
         )
         await message.answer("✅ Ответ отправлен.")
     except Exception:
@@ -942,8 +949,22 @@ async def support_direct_text(message: Message, state: FSMContext, bot: Bot):
         return
     user_id = (await state.get_data()).get("direct_user_id")
     try:
-        await bot.send_message(user_id, f"💌 Личное сообщение администрации:\n\n{body}{SUPPORT_SIGNATURE}")
-        await message.answer("✅ Сообщение отправлено.")
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                ticket_id = await conn.fetchval(
+                    "INSERT INTO nobody_support_tickets (user_id,user_can_close) VALUES ($1,FALSE) RETURNING id",
+                    user_id
+                )
+                await conn.execute(
+                    "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'admin',$3)",
+                    ticket_id, message.from_user.id, body
+                )
+        await bot.send_message(
+            user_id,
+            f"💌 Личное сообщение администрации:\n\n{body}{SUPPORT_SIGNATURE}",
+            reply_markup=support_user_reply_keyboard(ticket_id)
+        )
+        await message.answer("✅ Сообщение отправлено. Пользователь сможет ответить, а завершить диалог сможешь только ты.")
     except Exception:
         log.exception("Could not send direct support message to %s", user_id)
         await message.answer("Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
