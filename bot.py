@@ -690,6 +690,7 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
     body = data.get("body")
     if not recipient_id or category not in CATEGORIES or not body:
         await callback.answer("Данные сообщения потерялись. Начните заново.", show_alert=True); return
+    referral_commission = None
     try:
         async with db_pool.acquire() as conn:
             async with conn.transaction():
@@ -1010,7 +1011,23 @@ async def withdraw_approve(callback: CallbackQuery):
         await callback.answer("Нет доступа.", show_alert=True); return
     wid = int(callback.data.rsplit(":",1)[1])
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("UPDATE nobody_withdrawals SET status='approved',reviewed_at=NOW() WHERE id=$1 AND status='pending' RETURNING user_id,amount,payout_amount", wid)
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """UPDATE nobody_withdrawals SET status='approved',reviewed_at=NOW()
+                   WHERE id=$1 AND status='pending'
+                   RETURNING user_id,amount,payout_amount,referrer_id,referrer_commission""",
+                wid
+            )
+            if row and row["referrer_id"] and Decimal(row["referrer_commission"]) > 0:
+                await conn.execute(
+                    """INSERT INTO nobody_partner_ledger
+                       (partner_id,source_user_id,amount,kind,description,ref)
+                       VALUES ($1,$2,$3,'withdrawal_commission',$4,$5)
+                       ON CONFLICT (ref) DO NOTHING""",
+                    row["referrer_id"], row["user_id"], row["referrer_commission"],
+                    f"Комиссия за одобренный вывод приглашённого пользователя №{wid}",
+                    f"withdraw-referral:{wid}"
+                )
     if not row:
         await callback.answer("Заявка уже обработана.", show_alert=True); return
     await callback.answer("Отмечено как выплачено.")
