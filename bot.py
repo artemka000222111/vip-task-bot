@@ -48,6 +48,7 @@ POSTCARDS = {
 class AnonymousFlow(StatesGroup):
     category = State()
     text = State()
+    confirm = State()
 
 class AdminFlow(StatesGroup):
     balance_user = State()
@@ -428,6 +429,7 @@ async def receive_text(message: Message, state: FSMContext):
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
+    await state.set_state(AnonymousFlow.confirm)
     await send_flow_message(message.bot, message.chat.id, state,
                                 "💌 Сообщение готово! Что делаем дальше?",
                                 reply_markup=message_send_options_keyboard())
