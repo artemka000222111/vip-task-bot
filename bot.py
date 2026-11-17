@@ -52,12 +52,16 @@ class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
     price_value = State()
-    postcard_photo = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
     sender = State()
     confirm = State()
+
+class WithdrawFlow(StatesGroup):
+    amount = State()
+    phone = State()
+    bank = State()
 
 class ReplyFlow(StatesGroup):
     text = State()
@@ -95,7 +99,7 @@ def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🌹 Роза", callback_data="card:select:rose")],
         [InlineKeyboardButton(text="💔 Разбитое сердце", callback_data="card:select:broken")],
         [InlineKeyboardButton(text="💌 Тайный конверт", callback_data="card:select:envelope")],
-        [InlineKeyboardButton(text="🎁 Подарок", callback_data="card:select:gift")],
+        [InlineKeyboardButton(text="🎁 Подарить деньги", callback_data="card:gift")],
         [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
     ])
 
@@ -206,6 +210,14 @@ async def init_database() -> None:
             CREATE TABLE IF NOT EXISTS nobody_support_blocks (
                 user_id BIGINT PRIMARY KEY REFERENCES nobody_users(telegram_id),
                 blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_withdrawals (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                amount NUMERIC(12,2) NOT NULL CHECK (amount > 0), phone TEXT NOT NULL, bank TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), reviewed_at TIMESTAMPTZ
             )
         """)
         await conn.execute("""
@@ -354,13 +366,13 @@ async def receive_text(message: Message, state: FSMContext):
     await state.update_data(body=body)
     card_price = await get_price("card_price")
     await send_flow_message(message.bot, message.chat.id, state,
-                            "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — интрига и секрет\n🎁 Подарок — приятный сюрприз\n\nВыбирай открытку и отправляй красиво!",
+                            "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай открытку и отправляй красиво!",
                             reply_markup=postcard_keyboard(card_price))
 
 @dp.callback_query(F.data.startswith("card:select:"))
 async def select_postcard(callback: CallbackQuery, state: FSMContext, bot: Bot):
     key = callback.data.rsplit(":", 1)[1]
-    if key not in ("heart", "rose", "broken", "envelope", "gift"):
+    if key not in ("heart", "rose", "broken", "envelope"):
         await callback.answer("Неизвестная открытка.", show_alert=True); return
     async with db_pool.acquire() as conn:
         file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", postcard_setting_key(key))
@@ -579,9 +591,94 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
 async def balance(message: Message):
     amount = await get_balance(message.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")]
+        [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")],
+        [InlineKeyboardButton(text="💸 Вывести средства", callback_data="withdraw:start")]
     ])
     await message.answer(f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=kb)
+
+@dp.callback_query(F.data == "withdraw:start")
+async def withdraw_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(WithdrawFlow.amount)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("💸 Вывод средств\n\nВведи сумму вывода:")
+
+@dp.message(WithdrawFlow.amount)
+async def withdraw_amount(message: Message, state: FSMContext):
+    try:
+        amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
+        if amount <= 0 or amount > Decimal("1000000"): raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        await message.answer("Введи корректную сумму больше 0 ₽."); return
+    if await get_balance(message.from_user.id) < amount:
+        await state.clear()
+        await message.answer("Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
+    await state.update_data(withdraw_amount=str(amount))
+    await state.set_state(WithdrawFlow.phone)
+    await message.answer("Укажи номер телефона для получения перевода:")
+
+@dp.message(WithdrawFlow.phone)
+async def withdraw_phone(message: Message, state: FSMContext):
+    phone = (message.text or "").strip()
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits) < 10 or len(digits) > 15:
+        await message.answer("Проверь номер телефона и введи ещё раз."); return
+    await state.update_data(withdraw_phone=phone)
+    await state.set_state(WithdrawFlow.bank)
+    await message.answer("Укажи название банка:")
+
+@dp.message(WithdrawFlow.bank)
+async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
+    bank = (message.text or "").strip()
+    if len(bank) < 2 or len(bank) > 80:
+        await message.answer("Введи название банка."); return
+    data = await state.get_data()
+    amount = Decimal(data["withdraw_amount"])
+    uid = message.from_user.id
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            updated = await conn.fetchval("UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance", uid, amount)
+            if updated is None:
+                await state.clear()
+                await message.answer("Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
+            wid = await conn.fetchval("INSERT INTO nobody_withdrawals (user_id,amount,phone,bank) VALUES ($1,$2,$3,$4) RETURNING id", uid, amount, data["withdraw_phone"], bank)
+            await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Заявка на вывод средств',$3)", uid, -amount, f"withdraw:{wid}")
+    await state.clear()
+    await message.answer(f"✅ Заявка на вывод №{wid} отправлена. {amount:.2f} ₽ списаны до проверки.")
+    user = message.from_user
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"), InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")]])
+    await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\nСумма: {amount:.2f} ₽\nТелефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\nUsername: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("withdraw:approve:"))
+async def withdraw_approve(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True); return
+    wid = int(callback.data.rsplit(":",1)[1])
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("UPDATE nobody_withdrawals SET status='approved',reviewed_at=NOW() WHERE id=$1 AND status='pending' RETURNING user_id,amount", wid)
+    if not row:
+        await callback.answer("Заявка уже обработана.", show_alert=True); return
+    await callback.answer("Отмечено как выплачено.")
+    if callback.message: await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.bot.send_message(row["user_id"], f"✅ Вывод №{wid} отмечен как выплаченный: {Decimal(row['amount']):.2f} ₽.")
+
+@dp.callback_query(F.data.startswith("withdraw:reject:"))
+async def withdraw_reject(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True); return
+    wid = int(callback.data.rsplit(":",1)[1])
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("UPDATE nobody_withdrawals SET status='rejected',reviewed_at=NOW() WHERE id=$1 AND status='pending' RETURNING user_id,amount", wid)
+            if row:
+                await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", row["user_id"], row["amount"])
+                await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'credit','Возврат отклонённого вывода',$3)", row["user_id"], row["amount"], f"withdraw-refund:{wid}")
+    if not row:
+        await callback.answer("Заявка уже обработана.", show_alert=True); return
+    await callback.answer("Средства возвращены.")
+    if callback.message: await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.bot.send_message(row["user_id"], f"❌ Вывод №{wid} отклонён. {Decimal(row['amount']):.2f} ₽ возвращены на баланс.")
 
 @dp.callback_query(F.data == "topup:start")
 async def topup_start(callback: CallbackQuery, state: FSMContext):
@@ -1131,7 +1228,6 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🚫 Блокировка поддержки", callback_data="support:block")],
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="🖼 Управление открытками", callback_data="admin:postcards")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -1154,15 +1250,6 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         ])
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
-    elif action == "postcards":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌹 Добавить / заменить розу", callback_data="postcard:upload:rose")],
-            [InlineKeyboardButton(text="💔 Добавить / заменить разбитое сердце", callback_data="postcard:upload:broken")],
-            [InlineKeyboardButton(text="💌 Добавить / заменить тайный конверт", callback_data="postcard:upload:envelope")],
-            [InlineKeyboardButton(text="🎁 Добавить / заменить подарок", callback_data="postcard:upload:gift")],
-        ])
-        if callback.message:
-            await callback.message.answer("🖼 УПРАВЛЕНИЕ ОТКРЫТКАМИ\n\nВыбери открытку, затем отправь сюда фотографию. Она сохранится в боте и появится у пользователей.", reply_markup=kb)
     elif action == "stats":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👥 Люди", callback_data="stats:people")],
@@ -1171,44 +1258,6 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         if callback.message:
             await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
 
-
-@dp.callback_query(F.data.startswith("postcard:upload:"))
-async def start_postcard_upload(callback: CallbackQuery, state: FSMContext):
-    if not await is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа.", show_alert=True); return
-    key = callback.data.rsplit(":", 1)[1]
-    titles = {"rose": "🌹 Роза", "broken": "💔 Разбитое сердце", "envelope": "💌 Тайный конверт", "gift": "🎁 Подарок"}
-    if key not in titles:
-        await callback.answer("Неизвестная открытка.", show_alert=True); return
-    await state.set_state(AdminFlow.postcard_photo)
-    await state.update_data(postcard_upload_key=key)
-    await callback.answer()
-    if callback.message:
-        await callback.message.answer(f"Отправь фотографию для открытки «{titles[key]}» одним сообщением. Я сохраню её в боте.")
-
-@dp.message(AdminFlow.postcard_photo, F.photo)
-async def save_postcard_photo(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id): return
-    data = await state.get_data()
-    key = data.get("postcard_upload_key")
-    titles = {"rose": "🌹 Роза", "broken": "💔 Разбитое сердце", "envelope": "💌 Тайный конверт", "gift": "🎁 Подарок"}
-    if key not in titles:
-        await state.clear()
-        await message.answer("Не удалось определить открытку. Открой управление открытками заново.")
-        return
-    file_id = message.photo[-1].file_id
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO nobody_settings (key, value) VALUES ($1, $2)
-            ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
-        """, f"postcard_file_id_{key}", file_id)
-    await state.clear()
-    await message.answer(f"✅ Фото для открытки «{titles[key]}» сохранено! Она доступна пользователям.")
-
-@dp.message(AdminFlow.postcard_photo)
-async def postcard_upload_wrong_format(message: Message):
-    if await is_admin(message.from_user.id):
-        await message.answer("Нужно отправить именно фотографию, не файл и не текст.")
 
 @dp.callback_query(F.data == "stats:people")
 async def stats_people(callback: CallbackQuery):
