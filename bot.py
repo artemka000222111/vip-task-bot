@@ -820,6 +820,8 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                 )
                 if row["revealed"]:
                     already_revealed = True
+                    reveal_price = None
+                    balance_after = None
                 else:
                     reveal_price = await get_price("reveal_price")
                     updated = await conn.fetchrow(
@@ -828,6 +830,7 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                     )
                     if updated is None:
                         raise ValueError("Недостаточно средств. Пополни баланс и попробуй снова.")
+                    balance_after = updated["balance"]
                     await conn.execute(
                         """INSERT INTO nobody_transactions (user_id, amount, kind, description, ref)
                            VALUES ($1,$2,'debit',$3,$4)""",
@@ -856,6 +859,11 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
             f"Имя: {full_name}\nUsername: {username}\nTelegram ID: {author['telegram_id'] if author else row['sender_id']}"
         )
         if callback.message:
+            if not already_revealed:
+                await callback.message.answer(
+                    f"💸 Списано с баланса: {reveal_price:.2f} ₽\\n"
+                    f"Остаток на балансе: {balance_after:.2f} ₽"
+                )
             await callback.message.answer(result_text)
     except ValueError as exc:
         if "Недостаточно средств" in str(exc):
