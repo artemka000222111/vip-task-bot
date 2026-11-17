@@ -961,19 +961,29 @@ async def topup_approve(callback: CallbackQuery, bot: Bot):
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
+    resume_gift = False
+    user_state = None
     try:
         user_state = await dp.fsm.get_context(bot=bot, chat_id=row["user_id"], user_id=row["user_id"])
         saved = await user_state.get_data()
-        if saved.get("resume_gift"):
+        resume_gift = bool(saved.get("resume_gift"))
+        if resume_gift:
             await user_state.update_data(resume_gift=False)
             await user_state.set_state(GiftFlow.amount)
+    except Exception:
+        log.exception("Could not restore gift flow after top-up %s", topup_id)
+    try:
+        if resume_gift:
             await bot.send_message(
                 row["user_id"],
                 f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.\n\n"
                 "Возвращаемся к денежному подарку 🎁\nУкажи сумму от 10 до 5 000 ₽:"
             )
         else:
-            await bot.send_message(row["user_id"], f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.")
+            await bot.send_message(
+                row["user_id"],
+                f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽."
+            )
     except Exception:
         log.exception("Could not notify user about approved top-up %s", topup_id)
 
