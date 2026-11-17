@@ -83,7 +83,6 @@ def postcard_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️ Посмотреть сердечко — 10 ₽", callback_data="card:preview")],
         [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
-        [InlineKeyboardButton(text="Отмена", callback_data="card:cancel")],
     ])
 
 def preview_keyboard() -> InlineKeyboardMarkup:
@@ -91,6 +90,23 @@ def preview_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💳 Купить за 10 ₽", callback_data="card:buy")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="card:back")],
     ])
+
+async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    message_id = data.get("flow_bot_message_id")
+    if message_id:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception:
+            log.debug("Could not delete previous flow message %s", message_id)
+        await state.update_data(flow_bot_message_id=None)
+
+async def send_flow_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
+                            reply_markup=None) -> Message:
+    await clear_flow_message(bot, chat_id, state)
+    sent = await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    await state.update_data(flow_bot_message_id=sent.message_id)
+    return sent
 
 async def init_database() -> None:
     global db_pool
@@ -227,10 +243,11 @@ async def start(message: Message, state: FSMContext, bot: Bot):
             return
         await state.update_data(recipient_id=recipient_id)
         await state.set_state(AnonymousFlow.category)
-        await message.answer(
+        sent = await message.answer(
             "Выберите категорию анонимного сообщения.\n\n"
             "Учти, твою личность могут раскрыть.",
             reply_markup=category_keyboard())
+        await state.update_data(flow_bot_message_id=sent.message_id)
         return
     await message.answer(
         "👋 Добро пожаловать в VIP NOBODY!\n\nПоделись своей ссылкой, чтобы получить анонимное сообщение.",
@@ -245,8 +262,8 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AnonymousFlow.text)
     await callback.answer()
     if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(f"{CATEGORIES[key]}\n\nТеперь напишите текст сообщения.")
+        await callback.message.edit_text(f"{CATEGORIES[key]}\n\nТеперь напишите текст сообщения.")
+        await state.update_data(flow_bot_message_id=callback.message.message_id)
 
 @dp.message(AnonymousFlow.text)
 async def receive_text(message: Message, state: FSMContext):
@@ -257,7 +274,9 @@ async def receive_text(message: Message, state: FSMContext):
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
-    await message.answer("Текст готов! Можно добавить фирменную открытку:", reply_markup=postcard_keyboard())
+    await send_flow_message(message.bot, message.chat.id, state,
+                            "Текст готов! Можно добавить фирменную открытку:",
+                            reply_markup=postcard_keyboard())
 
 @dp.callback_query(F.data == "card:preview")
 async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -267,12 +286,15 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
     async with db_pool.acquire() as conn:
         file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='heart_file_id'")
     await callback.answer()
+    if callback.message:
+        await clear_flow_message(bot, callback.from_user.id, state)
     if file_id and callback.message:
-        await bot.send_photo(callback.from_user.id, file_id,
+        sent = await bot.send_photo(callback.from_user.id, file_id,
             caption="❤️ Красное сердечко — 10 ₽\n\nТак будет выглядеть открытка у получателя.",
             reply_markup=preview_keyboard())
+        await state.update_data(flow_bot_message_id=sent.message_id)
     elif callback.message:
-        await callback.message.answer(
+        await send_flow_message(bot, callback.from_user.id, state,
             "❤️ ПРЕДПРОСМОТР ОТКРЫТКИ\n\n"
             "Красное сердечко на тёмном фоне.\n"
             "Логотип VIP NOBODY будет маленьким и аккуратным в углу.\n\n"
@@ -280,14 +302,16 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
             reply_markup=preview_keyboard())
 
 @dp.callback_query(F.data == "card:back")
-async def card_back(callback: CallbackQuery):
+async def card_back(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     if callback.message:
-        await callback.message.answer("Выберите действие:", reply_markup=postcard_keyboard())
+        await send_flow_message(bot, callback.from_user.id, state,
+                                "Выберите действие:", reply_markup=postcard_keyboard())
 
 async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot, paid_card: bool):
     data = await state.get_data()
     sender_id = callback.from_user.id
+    await clear_flow_message(bot, sender_id, state)
     recipient_id = data.get("recipient_id")
     category = data.get("category")
     body = data.get("body")
@@ -331,12 +355,6 @@ async def buy_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
 @dp.callback_query(F.data == "card:free")
 async def send_without_card(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await finish_anonymous(callback, state, bot, False)
-
-@dp.callback_query(F.data == "card:cancel")
-async def cancel_card(callback: CallbackQuery, state: FSMContext):
-    await state.clear(); await callback.answer("Отменено.")
-    if callback.message:
-        await callback.message.answer("Отправка отменена.")
 
 @dp.message(F.text == "🔗 Моя ссылка")
 async def my_link(message: Message, bot: Bot):
