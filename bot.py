@@ -56,6 +56,7 @@ class AdminFlow(StatesGroup):
     message_view_user = State()
     broadcast_text = State()
     broadcast_confirm = State()
+    referral_bonus_amount = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
@@ -219,7 +220,7 @@ async def init_database() -> None:
         await conn.execute("""
             INSERT INTO nobody_settings (key, value)
             VALUES ('min_topup_amount', '1'), ('min_withdraw_amount', '100'),
-                   ('referral_bonus_enabled', 'true')
+                   ('referral_bonus_enabled', 'true'), ('referral_bonus_amount', '1')
             ON CONFLICT (key) DO NOTHING
         """)
         await conn.execute("""
@@ -439,30 +440,34 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                             "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
                         )
                         if str(bonus_enabled or "true").lower() == "true":
+                            bonus_amount = Decimal(await conn.fetchval(
+                                "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
+                            ) or "1")
                             inserted = await conn.fetchval(
                                 """INSERT INTO nobody_partner_ledger
                                    (partner_id,source_user_id,amount,kind,description,ref)
-                                   VALUES ($1,$2,1.00,'referral_bonus',$3,$4)
+                                   VALUES ($1,$2,$3,'referral_bonus',$4,$5)
                                    ON CONFLICT (ref) DO NOTHING RETURNING id""",
-                                linked_referrer, message.from_user.id,
+                                linked_referrer, message.from_user.id, bonus_amount,
                                 "Бонус за нового реферала", f"referral-bonus:{message.from_user.id}"
                             )
                             if inserted:
-                                referral_bonus = linked_referrer
+                                referral_bonus = (linked_referrer, bonus_amount)
                 else:
                     await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
         if referral_bonus:
+            referrer_id, credited_amount = referral_bonus
             try:
                 await bot.send_message(
-                    referral_bonus,
+                    referrer_id,
                     "🎉 У вас новый реферал!\n\n"
-                    "На ваш партнёрский баланс зачислен 1 ₽.\n\n"
+                    f"На ваш партнёрский баланс зачислено {credited_amount:g} ₽.\n\n"
                     "Также вы получаете:\n"
                     "💌 10% с каждой его покупки\n"
                     "💸 5% с его вывода после одобрения заявки."
                 )
             except Exception:
-                log.exception("Could not notify referrer %s about new referral", referral_bonus)
+                log.exception("Could not notify referrer %s about new referral", referrer_id)
     else:
         async with db_pool.acquire() as conn:
             await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1 AND referral_locked=FALSE", message.from_user.id)
@@ -943,9 +948,13 @@ async def partner_cabinet(message: Message, bot: Bot):
         bonus_enabled = await conn.fetchval(
             "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
         )
+        bonus_amount = await conn.fetchval(
+            "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
+        )
     bonus_enabled = str(bonus_enabled or "true").lower() == "true"
+    bonus_amount = Decimal(bonus_amount or "1")
     signup_bonus_text = (
-        "Приглашай друзей и получай 1 ₽ за каждого нового реферала, "
+        f"Приглашай друзей и получай {bonus_amount:g} ₽ за каждого нового реферала, "
         "10% с его покупок и 5% с одобренных выводов."
         if bonus_enabled else
         "Приглашай друзей и получай 10% с его покупок и 5% с одобренных выводов."
@@ -995,12 +1004,16 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             bonus_enabled = await conn.fetchval(
                 "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
             )
+            bonus_amount = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
+            )
         bonus_enabled = str(bonus_enabled or "true").lower() == "true"
+        bonus_amount = Decimal(bonus_amount or "1")
         me = await bot.get_me()
         link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
         share_url = f"https://t.me/share/url?url={quote(link, safe='')}"
         signup_bonus_text = (
-            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\n"
+            f"👥 Новый реферал — {bonus_amount:g} ₽ сразу после первого перехода по твоей ссылке\n"
             if bonus_enabled else ""
         )
         signup_bonus_footer = (
@@ -2052,6 +2065,9 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             enabled_value = await conn.fetchval(
                 "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
             )
+            amount_value = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
+            )
             referrals_total = await conn.fetchval(
                 "SELECT COUNT(*) FROM nobody_users WHERE referred_by IS NOT NULL"
             )
@@ -2059,19 +2075,22 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
                 "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE kind='referral_bonus'"
             )
         enabled = str(enabled_value or "true").lower() == "true"
+        amount = Decimal(amount_value or "1")
         status = "🟢 ВКЛЮЧЕН" if enabled else "🔴 ВЫКЛЮЧЕН"
-        toggle_label = "🔴 Выключить бонус 1 ₽" if enabled else "🟢 Включить бонус 1 ₽"
+        toggle_label = "🔴 Выключить бонус" if enabled else "🟢 Включить бонус"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")]
+            [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")],
+            [InlineKeyboardButton(text="💰 Изменить сумму бонуса", callback_data="referrals:amount")]
         ])
         if callback.message:
             await callback.message.answer(
                 "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
-                    f"Статус бонуса 1 ₽: {status}\n\n"
-                    f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
-                    f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
-                    "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
-                    "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
+                f"Статус бонуса {amount:g} ₽: {status}\n"
+                f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
+                f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
+                f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
+                f"При отключении бонус {amount:g} ₽ новым рефералам начисляться не будет.\n"
+                "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
                 reply_markup=kb
             )
 
@@ -2108,6 +2127,69 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             )
 
 
+@dp.callback_query(F.data == "referrals:amount")
+async def admin_referrals_amount_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(AdminFlow.referral_bonus_amount)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "💰 Введи новую сумму бонуса за одного нового реферала в рублях.\n"
+            "Например: 2 или 2.50"
+        )
+
+
+@dp.message(AdminFlow.referral_bonus_amount)
+async def admin_referrals_amount_save(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        amount = Decimal(raw)
+        if not amount.is_finite() or amount <= 0 or amount > Decimal("100000"):
+            raise InvalidOperation
+        amount = amount.quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
+        await message.answer("Введи сумму больше 0 и не больше 100 000 ₽. Например: 2 или 2.50")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO nobody_settings (key,value) VALUES ('referral_bonus_amount',$1)
+               ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
+            str(amount)
+        )
+        enabled_value = await conn.fetchval(
+            "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
+        )
+        referrals_total = await conn.fetchval(
+            "SELECT COUNT(*) FROM nobody_users WHERE referred_by IS NOT NULL"
+        )
+        bonus_total = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE kind='referral_bonus'"
+        )
+    await state.clear()
+    enabled = str(enabled_value or "true").lower() == "true"
+    status = "🟢 ВКЛЮЧЕН" if enabled else "🔴 ВЫКЛЮЧЕН"
+    toggle_label = "🔴 Выключить бонус" if enabled else "🟢 Включить бонус"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")],
+        [InlineKeyboardButton(text="💰 Изменить сумму бонуса", callback_data="referrals:amount")]
+    ])
+    await message.answer(
+        "✅ Сумма бонуса обновлена!\n\n"
+        f"Статус бонуса {amount:g} ₽: {status}\n"
+        f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
+        f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
+        f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
+        "Новая сумма применяется только к новым рефералам.",
+        reply_markup=kb
+    )
+
+
 @dp.callback_query(F.data == "referrals:toggle")
 async def admin_referrals_toggle(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id):
@@ -2124,6 +2206,9 @@ async def admin_referrals_toggle(callback: CallbackQuery):
                    ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
                 new_value
             )
+            amount_value = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
+            )
             referrals_total = await conn.fetchval(
                 "SELECT COUNT(*) FROM nobody_users WHERE referred_by IS NOT NULL"
             )
@@ -2131,10 +2216,12 @@ async def admin_referrals_toggle(callback: CallbackQuery):
                 "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE kind='referral_bonus'"
             )
     enabled = new_value == "true"
+    amount = Decimal(amount_value or "1")
     status = "🟢 ВКЛЮЧЕН" if enabled else "🔴 ВЫКЛЮЧЕН"
-    toggle_label = "🔴 Выключить бонус 1 ₽" if enabled else "🟢 Включить бонус 1 ₽"
+    toggle_label = "🔴 Выключить бонус" if enabled else "🟢 Включить бонус"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")]
+        [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")],
+        [InlineKeyboardButton(text="💰 Изменить сумму бонуса", callback_data="referrals:amount")]
     ])
     await callback.answer("Бонус включён." if enabled else "Бонус выключен.")
     if callback.message:
@@ -2144,11 +2231,12 @@ async def admin_referrals_toggle(callback: CallbackQuery):
             pass
         await callback.message.answer(
             "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
-                f"Статус бонуса 1 ₽: {status}\n\n"
-                f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
-                f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
-                "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
-                "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
+            f"Статус бонуса {amount:g} ₽: {status}\n"
+            f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
+            f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
+            f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
+            f"При отключении бонус {amount:g} ₽ новым рефералам начисляться не будет.\n"
+            "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
             reply_markup=kb
         )
 
