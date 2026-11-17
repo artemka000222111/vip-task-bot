@@ -51,13 +51,12 @@ class AnonymousFlow(StatesGroup):
 class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
-    card_upload = State()
 
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="📩 Входящие"), KeyboardButton(text="🔗 Моя ссылка")],
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
-        [KeyboardButton(text="🎴 Открытки"), KeyboardButton(text="ℹ️ Помощь")],
+        [KeyboardButton(text="ℹ️ Помощь")],
     ]
     if is_admin:
         rows.append([KeyboardButton(text="🛠 Админ-панель")])
@@ -339,10 +338,6 @@ async def profile(message: Message):
     user = message.from_user
     await message.answer(f"👤 Профиль VIP NOBODY\n\nИмя: {user.first_name or 'не указано'}\nUsername: @{user.username if user.username else 'не указан'}\nTelegram ID: {user.id}")
 
-@dp.message(F.text == "🎴 Открытки")
-async def postcards(message: Message):
-    await message.answer("❤️ Красное сердечко — 10 ₽\n🌹 Роза — в разработке\n💔 Разбитое сердце — в разработке\n👑 Корона VIP — в разработке\n🔥 Огонь — в разработке\n🎁 Подарок — в разработке\n💌 Тайный конверт — в разработке\n😂 Прикол — в разработке\n\nОткрытку можно выбрать при отправке анонимного сообщения.")
-
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_message(message: Message):
     await message.answer("ℹ️ VIP NOBODY\n\n1. Поделись ссылкой.\n2. Получай анонимные сообщения.\n3. Отправитель может добавить открытку за 10 ₽.\n\nТехнические данные отправителя сохраняются; абсолютная анонимность не гарантируется.")
@@ -357,7 +352,6 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="➕ Начислить баланс", callback_data="admin:credit"),
          InlineKeyboardButton(text="➖ Списать баланс", callback_data="admin:debit")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="❤️ Загрузить сердечко", callback_data="admin:upload_card")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -377,9 +371,6 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             msgs = await conn.fetchval("SELECT COUNT(*) FROM nobody_messages")
             total = await conn.fetchval("SELECT COALESCE(SUM(balance),0) FROM nobody_users")
         if callback.message: await callback.message.answer(f"📊 Статистика\nПользователей: {users}\nСообщений: {msgs}\nБалансов пользователей: {total:.2f} ₽")
-    elif action == "upload_card":
-        await state.set_state(AdminFlow.card_upload)
-        if callback.message: await callback.message.answer("Отправь сюда фотографию красного сердечка как обычное фото. Я сохраню её для предпросмотра и отправки.")
 
 @dp.message(AdminFlow.balance_user)
 async def admin_balance_user(message: Message, state: FSMContext):
@@ -414,22 +405,6 @@ async def admin_balance_amount(message: Message, state: FSMContext):
         await message.answer("У пользователя недостаточно средств."); return
     await state.clear()
     await message.answer(f"✅ Операция выполнена. Новый баланс: {await get_balance(target):.2f} ₽")
-
-@dp.message(AdminFlow.card_upload, F.photo)
-async def admin_card_upload(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id): return
-    file_id = message.photo[-1].file_id
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO nobody_settings(key,value) VALUES('heart_file_id',$1)
-            ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value
-        """, file_id)
-    await state.clear()
-    await message.answer("✅ Сердечко сохранено! Теперь пользователи смогут увидеть фото в предпросмотре.")
-
-@dp.message(AdminFlow.card_upload)
-async def admin_card_upload_wrong(message: Message):
-    await message.answer("Нужно отправить именно фотографию, не файл и не текст.")
 
 async def main():
     if not BOT_TOKEN: raise RuntimeError("Не задан BOT_TOKEN в переменных Railway.")
