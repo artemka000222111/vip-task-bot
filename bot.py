@@ -213,10 +213,6 @@ async def init_database() -> None:
             )
         """)
         await conn.execute("""
-            INSERT INTO nobody_settings (key,value) VALUES
-                ('card_price','10.00'), ('reveal_price','50.00')
-            ON CONFLICT (key) DO NOTHING
-        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_transactions (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
@@ -1227,7 +1223,15 @@ async def withdraw_approve(callback: CallbackQuery):
         await callback.answer("Заявка уже обработана.", show_alert=True); return
     await callback.answer("Отмечено как выплачено.")
     if callback.message: await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.bot.send_message(row["user_id"], f"✅ Вывод №{wid} отмечен как выплаченный. На карту отправлено: {Decimal(row['payout_amount']):.2f} ₽.")
+    await callback.bot.send_message(row["user_id"], f"✅ Вывод №{wid} одобрен. На карту отправлено: {Decimal(row['payout_amount']):.2f} ₽.")
+    if row["referrer_id"] and Decimal(row["referrer_commission"]) > 0:
+        try:
+            await callback.bot.send_message(
+                row["referrer_id"],
+                f"💰 Вам начислено {Decimal(row['referrer_commission']):.2f} ₽ — 5% с одобренного вывода приглашённого пользователя."
+            )
+        except Exception:
+            log.exception("Could not notify referrer for withdrawal %s", wid)
 
 @dp.callback_query(F.data.startswith("withdraw:reject:"))
 async def withdraw_reject(callback: CallbackQuery):
@@ -1852,7 +1856,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_price:.2f} ₽", callback_data="price:card")],
             [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_price:.2f} ₽", callback_data="price:reveal")],
-            [InlineKeyboardButton(text=f"💸 Комиссия вывода: {await get_price('withdraw_commission'):.2f}%", callback_data="price:withdraw")],
+
         ])
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
@@ -1984,13 +1988,13 @@ async def stats_earnings(callback: CallbackQuery):
             f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
         )
 
-@dp.callback_query(F.data.in_({"price:card", "price:reveal", "price:withdraw"}))
+@dp.callback_query(F.data.in_({"price:card", "price:reveal"}))
 async def admin_price_start(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    kind = {"price:card": "card_price", "price:reveal": "reveal_price", "price:withdraw": "withdraw_commission"}[callback.data]
-    title = {"card_price": "открытки", "reveal_price": "раскрытия личности", "withdraw_commission": "комиссию вывода"}[kind]
+    kind = {"price:card": "card_price", "price:reveal": "reveal_price"}[callback.data]
+    title = {"card_price": "открытки", "reveal_price": "раскрытия личности"}[kind]
     await state.clear()
     await state.update_data(price_kind=kind)
     await state.set_state(AdminFlow.price_value)
@@ -2006,15 +2010,15 @@ async def admin_price_save(message: Message, state: FSMContext):
     try:
         value = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
         data_for_limit = await state.get_data()
-        limit = Decimal("100") if data_for_limit.get("price_kind") == "withdraw_commission" else Decimal("1000000")
+        limit = Decimal("1000000")
         if value < 0 or value > limit:
             raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи корректное значение: комиссия от 0 до 100%, цена от 0 до 1 000 000 ₽.")
+        await message.answer("Введи корректную цену от 0 до 1 000 000 ₽.")
         return
     data = await state.get_data()
     key = data.get("price_kind")
-    if key not in ("card_price", "reveal_price", "withdraw_commission"):
+    if key not in ("card_price", "reveal_price"):
         await state.clear()
         await message.answer("Не удалось определить тип цены. Открой настройки заново.")
         return
@@ -2024,8 +2028,8 @@ async def admin_price_save(message: Message, state: FSMContext):
             key, str(value)
         )
     await state.clear()
-    label = {"card_price": "открытки", "reveal_price": "раскрытия личности", "withdraw_commission": "комиссии вывода"}[key]
-    suffix = "%" if key == "withdraw_commission" else " ₽"
+    label = {"card_price": "открытки", "reveal_price": "раскрытия личности"}[key]
+    suffix = " ₽"
     await message.answer(f"✅ Новое значение {label}: {value:.2f}{suffix}")
 
 @dp.message(AdminFlow.balance_user)
