@@ -354,7 +354,7 @@ async def receive_text(message: Message, state: FSMContext):
     await state.update_data(body=body)
     card_price = await get_price("card_price")
     await send_flow_message(message.bot, message.chat.id, state,
-                            "💌 Сообщение готово!\n\nУкрась его открыткой, чтобы сделать ещё приятнее. Выбери настроение своего послания:",
+                            "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — интрига и секрет\n🎁 Подарок — приятный сюрприз\n\nВыбирай открытку и отправляй красиво!",
                             reply_markup=postcard_keyboard(card_price))
 
 @dp.callback_query(F.data.startswith("card:select:"))
@@ -397,7 +397,7 @@ async def card_back(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.message:
         card_price = await get_price("card_price")
         await send_flow_message(bot, callback.from_user.id, state,
-                                "Выберите действие:", reply_markup=postcard_keyboard(card_price))
+                                "💌 Укрась своё сообщение открыткой!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — интрига и секрет\n🎁 Подарок — приятный сюрприз\n\nВыбирай настроение послания:", reply_markup=postcard_keyboard(card_price))
 
 async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot, paid_card: bool):
     data = await state.get_data()
