@@ -18,9 +18,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = 5540327696
 
-CARD_PRICE = Decimal("10.00")
-REVEAL_PRICE = Decimal("50.00")
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("vip-nobody")
 dp = Dispatcher(storage=MemoryStorage())
@@ -35,14 +32,14 @@ CATEGORIES = {
     "other": "💬 Другое",
 }
 POSTCARDS = {
-    "heart": {"title": "❤️ Красное сердечко", "price": CARD_PRICE},
-    "rose": {"title": "🌹 Роза", "price": CARD_PRICE},
-    "broken": {"title": "💔 Разбитое сердце", "price": CARD_PRICE},
-    "crown": {"title": "👑 Корона VIP", "price": CARD_PRICE},
-    "fire": {"title": "🔥 Огонь", "price": CARD_PRICE},
-    "gift": {"title": "🎁 Подарок", "price": CARD_PRICE},
-    "envelope": {"title": "💌 Тайный конверт", "price": CARD_PRICE},
-    "fun": {"title": "😂 Прикол", "price": CARD_PRICE},
+    "heart": {"title": "❤️ Красное сердечко"},
+    "rose": {"title": "🌹 Роза"},
+    "broken": {"title": "💔 Разбитое сердце"},
+    "crown": {"title": "👑 Корона VIP"},
+    "fire": {"title": "🔥 Огонь"},
+    "gift": {"title": "🎁 Подарок"},
+    "envelope": {"title": "💌 Тайный конверт"},
+    "fun": {"title": "😂 Прикол"},
 }
 
 class AnonymousFlow(StatesGroup):
@@ -74,6 +71,11 @@ class WithdrawFlow(StatesGroup):
 class ReplyFlow(StatesGroup):
     text = State()
 
+class PartnerWithdrawFlow(StatesGroup):
+    amount = State()
+    phone = State()
+    bank = State()
+
 class SupportFlow(StatesGroup):
     new_text = State()
     user_reply = State()
@@ -86,6 +88,7 @@ def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="🔗 Моя ссылка")],
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="💼 Мой заработок")],
         [KeyboardButton(text="ℹ️ Помощь")],
     ]
     if is_admin:
@@ -134,10 +137,11 @@ def insufficient_balance_keyboard() -> InlineKeyboardMarkup:
     ])
 
 async def get_price(key: str) -> Decimal:
-    defaults = {"card_price": CARD_PRICE, "reveal_price": REVEAL_PRICE, "withdraw_commission": Decimal("10.00")}
     async with db_pool.acquire() as conn:
         value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", key)
-    return Decimal(value) if value is not None else defaults[key]
+    if value is None:
+        raise ValueError("Администратор ещё не установил цену для этой услуги.")
+    return Decimal(value)
 
 async def clear_flow_message(bot: Bot, chat_id: int, state: FSMContext) -> None:
     data = await state.get_data()
@@ -173,6 +177,24 @@ async def init_database() -> None:
         """)
         await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS last_active_at TIMESTAMPTZ")
         await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS activity_count BIGINT NOT NULL DEFAULT 0")
+        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS referred_by BIGINT REFERENCES nobody_users(telegram_id)")
+        await conn.execute("ALTER TABLE nobody_users ADD COLUMN IF NOT EXISTS referral_locked BOOLEAN NOT NULL DEFAULT TRUE")
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_partner_ledger (
+                id BIGSERIAL PRIMARY KEY, partner_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                source_user_id BIGINT REFERENCES nobody_users(telegram_id), amount NUMERIC(12,2) NOT NULL,
+                kind TEXT NOT NULL, description TEXT NOT NULL, ref TEXT UNIQUE NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_partner_withdrawals (
+                id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                amount NUMERIC(12,2) NOT NULL CHECK (amount >= 100), phone TEXT NOT NULL, bank TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), reviewed_at TIMESTAMPTZ
+            )
+        """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_messages (
                 id BIGSERIAL PRIMARY KEY,
@@ -282,12 +304,38 @@ async def save_user(user) -> None:
         return
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO nobody_users (telegram_id, username, first_name, last_name, last_active_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO nobody_users (telegram_id, username, first_name, last_name, last_active_at, referral_locked)
+            VALUES ($1, $2, $3, $4, NOW(), FALSE)
             ON CONFLICT (telegram_id) DO UPDATE SET username=EXCLUDED.username,
                 first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
                 last_active_at=NOW(), activity_count=nobody_users.activity_count+1
         """, user.id, user.username, user.first_name or "", user.last_name)
+
+async def get_partner_balance(user_id: int, conn=None) -> Decimal:
+    if conn is not None:
+        value = await conn.fetchval("SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE partner_id=$1", user_id)
+    else:
+        async with db_pool.acquire() as db:
+            value = await db.fetchval("SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE partner_id=$1", user_id)
+    return Decimal(value or 0)
+
+
+async def add_partner_commission(conn, buyer_id: int, purchase_amount: Decimal, ref: str, description: str):
+    referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", buyer_id)
+    if not referrer_id or referrer_id == buyer_id:
+        return None
+    commission = (purchase_amount * Decimal("0.10")).quantize(Decimal("0.01"))
+    if commission <= 0:
+        return None
+    inserted = await conn.fetchval(
+        """INSERT INTO nobody_partner_ledger
+           (partner_id,source_user_id,amount,kind,description,ref)
+           VALUES ($1,$2,$3,'commission',$4,$5)
+           ON CONFLICT (ref) DO NOTHING RETURNING id""",
+        referrer_id, buyer_id, commission, description, ref
+    )
+    return (referrer_id, commission) if inserted else None
+
 
 class ActivityMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
@@ -362,6 +410,24 @@ async def start(message: Message, state: FSMContext, bot: Bot):
     await save_user(message.from_user)
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) == 2 else ""
+    if payload.startswith("ref_"):
+        try:
+            referrer_id = int(payload[4:])
+        except ValueError:
+            referrer_id = 0
+        async with db_pool.acquire() as conn:
+            if referrer_id and referrer_id != message.from_user.id:
+                await conn.execute(
+                    """UPDATE nobody_users SET referred_by=$2, referral_locked=TRUE
+                       WHERE telegram_id=$1 AND referral_locked=FALSE AND referred_by IS NULL
+                       AND EXISTS (SELECT 1 FROM nobody_users WHERE telegram_id=$2)""",
+                    message.from_user.id, referrer_id
+                )
+            else:
+                await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
+    else:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1 AND referral_locked=FALSE", message.from_user.id)
     if payload.startswith("to_"):
         try:
             recipient_id = int(payload[3:])
