@@ -109,6 +109,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=CATEGORIES["joke"], callback_data="category:joke")],
         [InlineKeyboardButton(text=CATEGORIES["gift"], callback_data="category:gift"),
          InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
+        [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="nav:home")],
     ])
 
 def message_send_options_keyboard() -> InlineKeyboardMarkup:
@@ -575,7 +576,8 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎭 Анонимно", callback_data="gift:visibility:anonymous")],
             [InlineKeyboardButton(text="👤 Показать, кто отправил", callback_data="gift:visibility:visible")],
-            [InlineKeyboardButton(text="❌ Отменить", callback_data="gift:cancel")]
+            [InlineKeyboardButton(text="❌ Отменить", callback_data="gift:cancel")],
+            [InlineKeyboardButton(text="⬅️ В главное меню", callback_data="nav:home")]
         ])
         async with db_pool.acquire() as conn:
             gift_photo = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='postcard_file_id_gift'")
@@ -869,20 +871,16 @@ async def return_to_main_menu(message: Message, state: FSMContext):
 async def callback_return_to_main_menu(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
-    await replace_callback_message(
-        callback,
-        "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
-        reply_markup=None
-    )
     if callback.message:
         try:
-            await callback.bot.send_message(
-                callback.from_user.id,
-                "Используй кнопки меню ниже.",
-                reply_markup=main_keyboard(await is_admin(callback.from_user.id))
-            )
+            await callback.message.delete()
         except Exception:
             pass
+    await callback.bot.send_message(
+        callback.from_user.id,
+        "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
+        reply_markup=main_keyboard(await is_admin(callback.from_user.id))
+    )
 
 
 @dp.message(F.text == "🔗 Моя ссылка")
@@ -2084,7 +2082,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
     ])
-    await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
+    await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=add_menu_back_button(kb))
 
 @dp.message(Command("setref"))
 async def admin_set_referrer(message: Message):
