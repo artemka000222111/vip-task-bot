@@ -672,7 +672,8 @@ SUPPORT_SIGNATURE = "\n\n— Сообщение от поддержки VIP NOBO
 
 def support_user_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Ответить администрации", callback_data=f"support:user_reply:{ticket_id}")]
+        [InlineKeyboardButton(text="↩️ Ответить администрации", callback_data=f"support:user_reply:{ticket_id}")],
+        [InlineKeyboardButton(text="🔒 Завершить диалог", callback_data=f"support:user_close:{ticket_id}")]
     ])
 
 def support_admin_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
@@ -858,6 +859,31 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
         log.exception("Could not deliver support response for ticket %s", ticket_id)
         await message.answer("Не удалось доставить ответ пользователю.")
     await state.clear()
+
+@dp.callback_query(F.data.startswith("support:user_close:"))
+async def support_user_close(callback: CallbackQuery, bot: Bot):
+    ticket_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        user_id = await conn.fetchval(
+            "UPDATE nobody_support_tickets SET status='closed',updated_at=NOW() "
+            "WHERE id=$1 AND user_id=$2 AND status='open' RETURNING user_id",
+            ticket_id, callback.from_user.id
+        )
+    if not user_id:
+        await callback.answer("Диалог уже закрыт или не найден.", show_alert=True)
+        return
+    await callback.answer("Диалог завершён.")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("🔒 Ты завершил диалог с поддержкой.")
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"🔒 Пользователь завершил диалог с поддержкой. Telegram ID: {user_id}"
+        )
+    except Exception:
+        log.exception("Could not notify admin that user closed support ticket %s", ticket_id)
+
 
 @dp.callback_query(F.data.startswith("support:close:"))
 async def support_close(callback: CallbackQuery, bot: Bot):
