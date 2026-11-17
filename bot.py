@@ -52,6 +52,7 @@ class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
     price_value = State()
+    postcard_photo = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
@@ -90,7 +91,11 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️ Посмотреть сердечко", callback_data="card:preview")],
+        [InlineKeyboardButton(text="❤️ Красное сердечко", callback_data="card:select:heart")],
+        [InlineKeyboardButton(text="🌹 Роза", callback_data="card:select:rose")],
+        [InlineKeyboardButton(text="💔 Разбитое сердце", callback_data="card:select:broken")],
+        [InlineKeyboardButton(text="💌 Тайный конверт", callback_data="card:select:envelope")],
+        [InlineKeyboardButton(text="🎁 Подарок", callback_data="card:select:gift")],
         [InlineKeyboardButton(text="Отправить без открытки", callback_data="card:free")],
     ])
 
@@ -273,17 +278,17 @@ async def message_actions_keyboard(message_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🔎 Раскрыть личность — {reveal_price:.2f} ₽", callback_data=f"msg:reveal:{message_id}")],
     ])
 
-async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, body: str, message_id: int, postcard: bool):
+async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, body: str, message_id: int, postcard: bool, postcard_key: str = "heart"):
     text = f"💌 Новая анонимка!\n\n{CATEGORIES.get(category, CATEGORIES['other'])}\n\n{body}\n\nСообщение #{message_id}"
     markup = await message_actions_keyboard(message_id)
     try:
         if postcard:
             async with db_pool.acquire() as conn:
-                file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='heart_file_id'")
+                file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{postcard_key}")
             if file_id:
                 await bot.send_photo(recipient_id, file_id, caption=text, reply_markup=markup)
             else:
-                await bot.send_message(recipient_id, "❤️ Открытка-сердечко\n\n" + text, reply_markup=markup)
+                await bot.send_message(recipient_id, text, reply_markup=markup)
         else:
             await bot.send_message(recipient_id, text, reply_markup=markup)
     except Exception:
@@ -345,16 +350,29 @@ async def receive_text(message: Message, state: FSMContext):
     await state.update_data(body=body)
     card_price = await get_price("card_price")
     await send_flow_message(message.bot, message.chat.id, state,
-                            "Текст готов! Можно добавить фирменную открытку:",
+                            "💌 Сообщение готово!\n\nУкрась его открыткой, чтобы сделать ещё приятнее. Выбери настроение своего послания:",
                             reply_markup=postcard_keyboard(card_price))
+
+@dp.callback_query(F.data.startswith("card:select:"))
+async def select_postcard(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    key = callback.data.rsplit(":", 1)[1]
+    if key not in ("heart", "rose", "broken", "envelope", "gift"):
+        await callback.answer("Неизвестная открытка.", show_alert=True); return
+    async with db_pool.acquire() as conn:
+        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{key}")
+    if not file_id:
+        await callback.answer("Эта открытка пока не добавлена. Загляни позже!", show_alert=True); return
+    await state.update_data(selected_postcard=key)
+    await card_preview(callback, state, bot)
 
 @dp.callback_query(F.data == "card:preview")
 async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
     if not data.get("body"):
         await callback.answer("Начните отправку заново по ссылке.", show_alert=True); return
+    postcard_key = data.get("selected_postcard", "heart")
     async with db_pool.acquire() as conn:
-        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='heart_file_id'")
+        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{postcard_key}")
     card_price = await get_price("card_price")
     await callback.answer()
     if callback.message:
@@ -411,14 +429,14 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
             await callback.message.answer(
                 "✅ Анонимное сообщение отправлено!" + (f" Открытка куплена за {card_price:.2f} ₽." if paid_card else ""),
                 reply_markup=main_keyboard(await is_admin(sender_id)))
-        await send_message_to_recipient(bot, recipient_id, category, body, row["id"], paid_card)
+        await send_message_to_recipient(bot, recipient_id, category, body, row["id"], paid_card, data.get("selected_postcard", "heart"))
     except ValueError as e:
         if "Недостаточно средств" in str(e):
             await state.clear()
             await callback.answer()
             if callback.message:
                 await callback.message.answer(
-                    "Недостаточно средств. Пополни баланс, чтобы купить сердечко.",
+                    "Недостаточно средств. Пополни баланс, чтобы купить открытку.",
                     reply_markup=insufficient_balance_keyboard()
                 )
         else:
@@ -1109,6 +1127,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🚫 Блокировка поддержки", callback_data="support:block")],
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🖼 Управление открытками", callback_data="admin:postcards")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -1131,6 +1150,15 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         ])
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
+    elif action == "postcards":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌹 Добавить / заменить розу", callback_data="postcard:upload:rose")],
+            [InlineKeyboardButton(text="💔 Добавить / заменить разбитое сердце", callback_data="postcard:upload:broken")],
+            [InlineKeyboardButton(text="💌 Добавить / заменить тайный конверт", callback_data="postcard:upload:envelope")],
+            [InlineKeyboardButton(text="🎁 Добавить / заменить подарок", callback_data="postcard:upload:gift")],
+        ])
+        if callback.message:
+            await callback.message.answer("🖼 УПРАВЛЕНИЕ ОТКРЫТКАМИ\n\nВыбери открытку, затем отправь сюда фотографию. Она сохранится в боте и появится у пользователей.", reply_markup=kb)
     elif action == "stats":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👥 Люди", callback_data="stats:people")],
@@ -1139,6 +1167,44 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         if callback.message:
             await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
 
+
+@dp.callback_query(F.data.startswith("postcard:upload:"))
+async def start_postcard_upload(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True); return
+    key = callback.data.rsplit(":", 1)[1]
+    titles = {"rose": "🌹 Роза", "broken": "💔 Разбитое сердце", "envelope": "💌 Тайный конверт", "gift": "🎁 Подарок"}
+    if key not in titles:
+        await callback.answer("Неизвестная открытка.", show_alert=True); return
+    await state.set_state(AdminFlow.postcard_photo)
+    await state.update_data(postcard_upload_key=key)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(f"Отправь фотографию для открытки «{titles[key]}» одним сообщением. Я сохраню её в боте.")
+
+@dp.message(AdminFlow.postcard_photo, F.photo)
+async def save_postcard_photo(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id): return
+    data = await state.get_data()
+    key = data.get("postcard_upload_key")
+    titles = {"rose": "🌹 Роза", "broken": "💔 Разбитое сердце", "envelope": "💌 Тайный конверт", "gift": "🎁 Подарок"}
+    if key not in titles:
+        await state.clear()
+        await message.answer("Не удалось определить открытку. Открой управление открытками заново.")
+        return
+    file_id = message.photo[-1].file_id
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO nobody_settings (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+        """, f"postcard_file_id_{key}", file_id)
+    await state.clear()
+    await message.answer(f"✅ Фото для открытки «{titles[key]}» сохранено! Она доступна пользователям.")
+
+@dp.message(AdminFlow.postcard_photo)
+async def postcard_upload_wrong_format(message: Message):
+    if await is_admin(message.from_user.id):
+        await message.answer("Нужно отправить именно фотографию, не файл и не текст.")
 
 @dp.callback_query(F.data == "stats:people")
 async def stats_people(callback: CallbackQuery):
