@@ -939,6 +939,17 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
 
 @dp.message(F.text == "💼 Мой заработок")
 async def partner_cabinet(message: Message, bot: Bot):
+    async with db_pool.acquire() as conn:
+        bonus_enabled = await conn.fetchval(
+            "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
+        )
+    bonus_enabled = str(bonus_enabled or "true").lower() == "true"
+    signup_bonus_text = (
+        "Приглашай друзей и получай 1 ₽ за каждого нового реферала, "
+        "10% с его покупок и 5% с одобренных выводов."
+        if bonus_enabled else
+        "Приглашай друзей и получай 10% с его покупок и 5% с одобренных выводов."
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="partner:analytics")],
         [InlineKeyboardButton(text="📖 Как это работает?", callback_data="partner:howto")],
@@ -946,8 +957,7 @@ async def partner_cabinet(message: Message, bot: Bot):
         [InlineKeyboardButton(text="📨 Поделиться ссылкой", callback_data="partner:share")],
     ])
     await message.answer(
-        "💼 МОЙ ЗАРАБОТОК\n\n"
-        "Приглашай друзей и получай 1 ₽ за каждого нового реферала, 10% с его покупок и 5% с одобренных выводов.",
+        "💼 МОЙ ЗАРАБОТОК\\n\\n" + signup_bonus_text,
         reply_markup=kb
     )
 
@@ -981,19 +991,33 @@ async def partner_analytics(callback: CallbackQuery):
 async def partner_howto(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     if callback.message:
+        async with db_pool.acquire() as conn:
+            bonus_enabled = await conn.fetchval(
+                "SELECT value FROM nobody_settings WHERE key='referral_bonus_enabled'"
+            )
+        bonus_enabled = str(bonus_enabled or "true").lower() == "true"
         me = await bot.get_me()
         link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
         share_url = f"https://t.me/share/url?url={quote(link, safe='')}"
+        signup_bonus_text = (
+            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\\n"
+            if bonus_enabled else ""
+        )
+        signup_bonus_footer = (
+            "Бонус за реферала и начисления за покупки поступают сразу, за вывод — после одобрения заявки."
+            if bonus_enabled else
+            "Начисления за покупки поступают сразу, за одобренный вывод — после подтверждения заявки."
+        )
         await callback.message.answer(
-            "📖 КАК ЭТО РАБОТАЕТ?\n\n"
-            "1. Нажми «Поделиться ссылкой» под этим сообщением.\n"
-            "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
-            "3. Получай бонусы и процент с его операций:\n\n"
-            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\n"
-            "💌 Покупка открытки — 10%\n"
-            "🔎 Раскрытие личности — 10%\n"
-            "💸 Одобренный вывод баланса — 5%\n\n"
-            "Бонус за реферала и начисления за покупки поступают сразу, за вывод — после одобрения заявки.",
+            "📖 КАК ЭТО РАБОТАЕТ?\\n\\n"
+            "1. Нажми «Поделиться ссылкой» под этим сообщением.\\n"
+            "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\\n"
+            "3. Получай процент с его операций:\\n\\n"
+            + signup_bonus_text +
+            "💌 Покупка открытки — 10%\\n"
+            "🔎 Раскрытие личности — 10%\\n"
+            "💸 Одобренный вывод баланса — 5%\\n\\n"
+            + signup_bonus_footer,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)]
             ])
