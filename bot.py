@@ -588,7 +588,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
             except Exception:
                 pass
             if gift_photo:
-                sent = await callback.message.answer_photo(gift_photo, caption=caption, reply_markup=kb)
+                sent = await callback.message.answer_photo(gift_photo, caption=caption, reply_markup=add_menu_back_button(kb))
             else:
                 sent = await replace_callback_message(callback, caption, reply_markup=kb)
             await state.update_data(flow_bot_message_id=sent.message_id)
@@ -1312,7 +1312,7 @@ async def balance(message: Message):
         [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")],
         [InlineKeyboardButton(text="💸 Вывести средства", callback_data="withdraw:start")]
     ])
-    await message.answer(f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=kb)
+    await message.answer(f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=add_menu_back_button(kb))
 
 @dp.callback_query(F.data == "withdraw:start")
 async def withdraw_start(callback: CallbackQuery, state: FSMContext):
