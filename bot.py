@@ -58,6 +58,11 @@ class TopUpFlow(StatesGroup):
     sender = State()
     confirm = State()
 
+class GiftFlow(StatesGroup):
+    amount = State()
+    text = State()
+    visibility = State()
+
 class WithdrawFlow(StatesGroup):
     amount = State()
     phone = State()
@@ -496,7 +501,7 @@ async def card_back(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if callback.message:
         card_price = await get_price("card_price")
         await send_flow_message(bot, callback.from_user.id, state,
-                                "💌 Укрась своё сообщение открыткой!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — интрига и секрет\n🎁 Подарок — приятный сюрприз\n\nВыбирай настроение послания:", reply_markup=postcard_keyboard(card_price))
+                                "💌 Укрась своё сообщение открыткой!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай настроение послания:", reply_markup=postcard_keyboard(card_price))
 
 async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot, paid_card: bool):
     data = await state.get_data()
