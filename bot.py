@@ -356,12 +356,12 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await clear_flow_message(bot, callback.from_user.id, state)
     if file_id and callback.message:
         sent = await bot.send_photo(callback.from_user.id, file_id,
-            caption=f"❤️ Красное сердечко — {card_price:.2f} ₽\n\n{data['body']}",
+            caption=f"{data['body']}\n\nВот так будет выглядеть анонимное сообщение",
             reply_markup=preview_keyboard(card_price))
         await state.update_data(flow_bot_message_id=sent.message_id)
     elif callback.message:
         await send_flow_message(bot, callback.from_user.id, state,
-            f"❤️ Красное сердечко — {card_price:.2f} ₽\n\n{data['body']}",
+            f"{data['body']}\n\nВот так будет выглядеть анонимное сообщение",
             reply_markup=preview_keyboard(card_price))
 
 @dp.callback_query(F.data == "card:back")
