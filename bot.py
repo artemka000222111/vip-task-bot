@@ -1839,6 +1839,40 @@ async def admin_panel(message: Message, state: FSMContext):
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
+@dp.message(Command("setref"))
+async def admin_set_referrer(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /setref TELEGRAM_ID")
+        return
+    invited_id = int(parts[1])
+    if invited_id == ADMIN_ID:
+        await message.answer("Нельзя назначить пользователя реферером самого себя.")
+        return
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            invited_exists = await conn.fetchval(
+                "SELECT 1 FROM nobody_users WHERE telegram_id=$1", invited_id
+            )
+            admin_exists = await conn.fetchval(
+                "SELECT 1 FROM nobody_users WHERE telegram_id=$1", ADMIN_ID
+            )
+            if not invited_exists or not admin_exists:
+                await message.answer("Не найден пользователь или аккаунт администратора в базе.")
+                return
+            await conn.execute(
+                """UPDATE nobody_users
+                   SET referred_by=$2, referral_locked=TRUE
+                   WHERE telegram_id=$1""",
+                invited_id, ADMIN_ID
+            )
+    await message.answer(
+        f"✅ Реферер назначен. Пользователь {invited_id} теперь приглашён администратором."
+    )
+
+
 @dp.callback_query(F.data.startswith("admin:"))
 async def admin_actions(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
