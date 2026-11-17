@@ -593,10 +593,10 @@ async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
             INSERT INTO nobody_topups (user_id, amount, sender_name)
             VALUES ($1, $2, $3) RETURNING id
         """, user.id, amount, data["sender_name"])
+    await clear_flow_message(bot, callback.from_user.id, state)
     await state.clear()
     await callback.answer("Заявка отправлена администратору!")
     if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer("✅ Заявка на пополнение отправлена. Баланс будет зачислен после проверки оплаты.")
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"topup:approve:{topup_id}"),
