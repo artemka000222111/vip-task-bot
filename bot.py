@@ -748,7 +748,16 @@ async def send_without_card(callback: CallbackQuery, state: FSMContext, bot: Bot
 async def my_link(message: Message, bot: Bot):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=to_{message.from_user.id}"
-    await message.answer("💜 Есть кое-что, что давно хотел сказать?\nПризнайся, задай вопрос или отправь комплимент — можешь остаться загадкой 👀\n\n👇 Напиши мне анонимно:\n" + link + "\n\nЖду твоё сообщение! 💌")
+    await message.answer(
+        "🔥 VIP NOBODY — анонимность, подарки и заработок!\n\n"
+        "💌 Отправляй анонимные сообщения.\n"
+        "🎁 Создавай красивые открытки.\n"
+        "💸 Дарите друг другу настоящие деньги.\n"
+        "🕵️ Узнавай, кто скрывается за анонимным сообщением.\n"
+        "💰 Приглашай друзей и получай 10% с их покупок!\n\n"
+        "👇 Переходи по моей ссылке, чтобы отправить мне анонимное сообщение:\n\n"
+        + link
+    )
 
 @dp.callback_query(F.data.startswith("msg:reply:"))
 async def begin_message_reply(callback: CallbackQuery, state: FSMContext):
