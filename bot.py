@@ -60,6 +60,14 @@ class TopUpFlow(StatesGroup):
 class ReplyFlow(StatesGroup):
     text = State()
 
+class SupportFlow(StatesGroup):
+    new_text = State()
+    user_reply = State()
+    admin_reply = State()
+    direct_target = State()
+    direct_text = State()
+    block_target = State()
+
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text="🔗 Моя ссылка")],
@@ -143,6 +151,31 @@ async def init_database() -> None:
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ref TEXT UNIQUE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_support_tickets (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_support_messages (
+                id BIGSERIAL PRIMARY KEY,
+                ticket_id BIGINT NOT NULL REFERENCES nobody_support_tickets(id) ON DELETE CASCADE,
+                sender_id BIGINT NOT NULL,
+                sender_role TEXT NOT NULL CHECK (sender_role IN ('user','admin')),
+                body TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_support_blocks (
+                user_id BIGINT PRIMARY KEY REFERENCES nobody_users(telegram_id),
+                blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
         await conn.execute("""
@@ -616,7 +649,320 @@ async def profile(message: Message):
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_message(message: Message):
-    await message.answer("ℹ️ VIP NOBODY\n\n1. Поделись ссылкой.\n2. Получай анонимные сообщения.\n3. Отправитель может добавить открытку за 10 ₽.\n\nТехнические данные отправителя сохраняются; абсолютная анонимность не гарантируется.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🆘 Обратиться в поддержку", callback_data="support:start")]
+    ])
+    await message.answer(
+        "💜 VIP NOBODY — место для анонимных признаний\n\n"
+        "Здесь можно отправлять людям анонимные сообщения, признаваться в чувствах, "
+        "задавать вопросы, делать комплименты или просто оставлять интересные послания.\n\n"
+        "Как это работает?\n"
+        "1. Открой раздел «Моя ссылка».\n"
+        "2. Поделись своей ссылкой с друзьями.\n"
+        "3. Получай анонимные сообщения.\n"
+        "4. Отвечай отправителям анонимно.\n\n"
+        "Дополнительные возможности:\n"
+        "❤️ Фирменная открытка к сообщению — 10 ₽.\n"
+        "🔎 Раскрытие личности отправителя — 50 ₽.\n\n"
+        "Если возник вопрос или проблема — напиши в поддержку.",
+        reply_markup=kb
+    )
+
+SUPPORT_SIGNATURE = "\n\n— Сообщение от поддержки VIP NOBODY"
+
+def support_user_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Ответить администрации", callback_data=f"support:user_reply:{ticket_id}")]
+    ])
+
+def support_admin_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"support:admin_reply:{ticket_id}"),
+         InlineKeyboardButton(text="🔒 Завершить диалог", callback_data=f"support:close:{ticket_id}")]
+    ])
+
+async def resolve_support_user(value: str):
+    value = value.strip()
+    async with db_pool.acquire() as conn:
+        if value.startswith("@"):
+            return await conn.fetchrow(
+                "SELECT telegram_id, username, first_name FROM nobody_users WHERE LOWER(username)=LOWER($1)",
+                value[1:]
+            )
+        try:
+            user_id = int(value)
+        except ValueError:
+            return None
+        return await conn.fetchrow(
+            "SELECT telegram_id, username, first_name FROM nobody_users WHERE telegram_id=$1",
+            user_id
+        )
+
+@dp.callback_query(F.data == "support:start")
+async def support_start(callback: CallbackQuery, state: FSMContext):
+    async with db_pool.acquire() as conn:
+        blocked = await conn.fetchval("SELECT 1 FROM nobody_support_blocks WHERE user_id=$1", callback.from_user.id)
+        ticket = await conn.fetchrow(
+            "SELECT id FROM nobody_support_tickets WHERE user_id=$1 AND status='open' ORDER BY id DESC LIMIT 1",
+            callback.from_user.id
+        )
+        ticket_id = ticket["id"] if ticket else None
+        if not blocked and not ticket_id:
+            ticket_id = await conn.fetchval(
+                "INSERT INTO nobody_support_tickets (user_id) VALUES ($1) RETURNING id",
+                callback.from_user.id
+            )
+    await callback.answer()
+    if blocked:
+        if callback.message:
+            await callback.message.answer("Обращения в поддержку для твоего аккаунта временно недоступны.")
+        return
+    await state.clear()
+    await state.update_data(support_ticket_id=ticket_id)
+    if ticket:
+        await state.set_state(SupportFlow.user_reply)
+        if callback.message:
+            await callback.message.answer(
+                f"У тебя уже есть открытый диалог с поддержкой №{ticket_id}. Можешь продолжить его.",
+                reply_markup=support_user_keyboard(ticket_id)
+            )
+    else:
+        await state.set_state(SupportFlow.new_text)
+        if callback.message:
+            await callback.message.answer("Опиши проблему или вопрос одним сообщением. Текст будет передан администрации.")
+
+async def notify_admin_support(bot: Bot, ticket_id: int, user_id: int, body: str, first: bool = False):
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT username, first_name, last_name FROM nobody_users WHERE telegram_id=$1", user_id
+        )
+    username = f"@{user['username']}" if user and user["username"] else "не указан"
+    name = " ".join(x for x in [user["first_name"], user["last_name"]] if x) if user else "неизвестно"
+    prefix = "🆘 НОВОЕ ОБРАЩЕНИЕ" if first else "💬 СООБЩЕНИЕ В ПОДДЕРЖКУ"
+    await bot.send_message(
+        ADMIN_ID,
+        f"{prefix} №{ticket_id}\n\nПользователь: {name}\nUsername: {username}\nTelegram ID: {user_id}\n\n{body}",
+        reply_markup=support_admin_keyboard(ticket_id)
+    )
+
+@dp.message(SupportFlow.new_text)
+async def support_new_text(message: Message, state: FSMContext, bot: Bot):
+    body = (message.text or "").strip()
+    if not body or len(body) > 3000:
+        await message.answer("Опиши проблему текстом до 3000 символов.")
+        return
+    ticket_id = (await state.get_data()).get("support_ticket_id")
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'user',$3)",
+            ticket_id, message.from_user.id, body
+        )
+        await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
+    await state.set_state(SupportFlow.user_reply)
+    await message.answer(
+        f"✅ Обращение №{ticket_id} отправлено администрации.",
+        reply_markup=support_user_keyboard(ticket_id)
+    )
+    try:
+        await notify_admin_support(bot, ticket_id, message.from_user.id, body, True)
+    except Exception:
+        log.exception("Could not notify admin about support ticket %s", ticket_id)
+
+@dp.callback_query(F.data.startswith("support:user_reply:"))
+async def support_user_reply_start(callback: CallbackQuery, state: FSMContext):
+    ticket_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        ticket = await conn.fetchrow("SELECT user_id,status FROM nobody_support_tickets WHERE id=$1", ticket_id)
+        blocked = await conn.fetchval("SELECT 1 FROM nobody_support_blocks WHERE user_id=$1", callback.from_user.id)
+    if not ticket or ticket["user_id"] != callback.from_user.id or ticket["status"] != "open" or blocked:
+        await callback.answer("Этот диалог закрыт или недоступен.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(support_ticket_id=ticket_id)
+    await state.set_state(SupportFlow.user_reply)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("Напиши сообщение для администрации:")
+
+@dp.message(SupportFlow.user_reply)
+async def support_user_reply(message: Message, state: FSMContext, bot: Bot):
+    body = (message.text or "").strip()
+    if not body or len(body) > 3000:
+        await message.answer("Напиши текст до 3000 символов.")
+        return
+    ticket_id = (await state.get_data()).get("support_ticket_id")
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            ticket = await conn.fetchrow("SELECT user_id,status FROM nobody_support_tickets WHERE id=$1 FOR UPDATE", ticket_id)
+            blocked = await conn.fetchval("SELECT 1 FROM nobody_support_blocks WHERE user_id=$1", message.from_user.id)
+            if not ticket or ticket["user_id"] != message.from_user.id or ticket["status"] != "open" or blocked:
+                await state.clear()
+                await message.answer("Диалог закрыт или обращения в поддержку недоступны.")
+                return
+            await conn.execute(
+                "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'user',$3)",
+                ticket_id, message.from_user.id, body
+            )
+            await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
+    await message.answer("✅ Сообщение отправлено администрации.", reply_markup=support_user_keyboard(ticket_id))
+    try:
+        await notify_admin_support(bot, ticket_id, message.from_user.id, body)
+    except Exception:
+        log.exception("Could not forward user reply in ticket %s", ticket_id)
+
+@dp.callback_query(F.data.startswith("support:admin_reply:"))
+async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    ticket_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        status = await conn.fetchval("SELECT status FROM nobody_support_tickets WHERE id=$1", ticket_id)
+    if status != "open":
+        await callback.answer("Диалог уже закрыт.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(support_ticket_id=ticket_id)
+    await state.set_state(SupportFlow.admin_reply)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(f"Введи ответ пользователю по обращению №{ticket_id}:")
+
+@dp.message(SupportFlow.admin_reply)
+async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    body = (message.text or "").strip()
+    if not body or len(body) > 3000:
+        await message.answer("Введи текст ответа до 3000 символов.")
+        return
+    ticket_id = (await state.get_data()).get("support_ticket_id")
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            ticket = await conn.fetchrow("SELECT user_id,status FROM nobody_support_tickets WHERE id=$1 FOR UPDATE", ticket_id)
+            if not ticket or ticket["status"] != "open":
+                await state.clear()
+                await message.answer("Диалог уже закрыт.")
+                return
+            await conn.execute(
+                "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'admin',$3)",
+                ticket_id, message.from_user.id, body
+            )
+            await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
+    try:
+        await bot.send_message(
+            ticket["user_id"], f"💬 Ответ поддержки по обращению №{ticket_id}:\n\n{body}{SUPPORT_SIGNATURE}",
+            reply_markup=support_user_keyboard(ticket_id)
+        )
+        await message.answer(f"✅ Ответ по обращению №{ticket_id} отправлен.")
+    except Exception:
+        log.exception("Could not deliver support response for ticket %s", ticket_id)
+        await message.answer("Не удалось доставить ответ пользователю.")
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("support:close:"))
+async def support_close(callback: CallbackQuery, bot: Bot):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    ticket_id = int(callback.data.rsplit(":", 1)[1])
+    async with db_pool.acquire() as conn:
+        user_id = await conn.fetchval(
+            "UPDATE nobody_support_tickets SET status='closed',updated_at=NOW() WHERE id=$1 AND status='open' RETURNING user_id",
+            ticket_id
+        )
+    if not user_id:
+        await callback.answer("Диалог уже закрыт или не найден.", show_alert=True)
+        return
+    await callback.answer("Диалог завершён.")
+    if callback.message:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    try:
+        await bot.send_message(user_id, f"🔒 Диалог с поддержкой №{ticket_id} завершён администрацией.")
+    except Exception:
+        log.exception("Could not notify user about closed support ticket %s", ticket_id)
+
+@dp.callback_query(F.data == "support:direct")
+async def support_direct_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(SupportFlow.direct_target)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("Введи Telegram ID или @username пользователя. Он должен ранее запустить бота.")
+
+@dp.message(SupportFlow.direct_target)
+async def support_direct_target(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    user = await resolve_support_user(message.text or "")
+    if not user:
+        await message.answer("Не нашёл пользователя. Проверь ID или @username — пользователь должен запускать бота.")
+        return
+    await state.update_data(direct_user_id=user["telegram_id"])
+    await state.set_state(SupportFlow.direct_text)
+    await message.answer(f"Получатель найден: {user['first_name']} (ID {user['telegram_id']}). Теперь введи сообщение.")
+
+@dp.message(SupportFlow.direct_text)
+async def support_direct_text(message: Message, state: FSMContext, bot: Bot):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    body = (message.text or "").strip()
+    if not body or len(body) > 3000:
+        await message.answer("Введи текст до 3000 символов.")
+        return
+    user_id = (await state.get_data()).get("direct_user_id")
+    try:
+        await bot.send_message(user_id, f"💌 Личное сообщение администрации:\n\n{body}{SUPPORT_SIGNATURE}")
+        await message.answer("✅ Сообщение отправлено.")
+    except Exception:
+        log.exception("Could not send direct support message to %s", user_id)
+        await message.answer("Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
+    await state.clear()
+
+@dp.callback_query(F.data == "support:block")
+async def support_block_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(SupportFlow.block_target)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(
+            "Введи Telegram ID или @username для блокировки. Чтобы снять запрет, введи: unblock ID или unblock @username."
+        )
+
+@dp.message(SupportFlow.block_target)
+async def support_block_target(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    value = (message.text or "").strip()
+    removing = value.lower().startswith("unblock ")
+    lookup = value[8:].strip() if removing else value
+    target = await resolve_support_user(lookup)
+    if not target:
+        await message.answer("Пользователь не найден. Проверь ID или @username.")
+        return
+    async with db_pool.acquire() as conn:
+        if removing:
+            await conn.execute("DELETE FROM nobody_support_blocks WHERE user_id=$1", target["telegram_id"])
+        else:
+            await conn.execute(
+                "INSERT INTO nobody_support_blocks (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                target["telegram_id"]
+            )
+    await state.clear()
+    if removing:
+        await message.answer(f"✅ Запрет обращений снят для ID {target['telegram_id']}.")
+    else:
+        await message.answer(f"🚫 Обращения в поддержку заблокированы для ID {target['telegram_id']}.")
 
 @dp.message(Command("admin"))
 @dp.message(F.text == "🛠 Админ-панель")
@@ -627,6 +973,8 @@ async def admin_panel(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Начислить баланс", callback_data="admin:credit"),
          InlineKeyboardButton(text="➖ Списать баланс", callback_data="admin:debit")],
+        [InlineKeyboardButton(text="✉️ Написать пользователю", callback_data="support:direct")],
+        [InlineKeyboardButton(text="🚫 Блокировка поддержки", callback_data="support:block")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
