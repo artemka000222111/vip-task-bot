@@ -100,6 +100,11 @@ def preview_keyboard(price: Decimal) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="card:back")],
     ])
 
+def insufficient_balance_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")]
+    ])
+
 async def get_price(key: str) -> Decimal:
     defaults = {"card_price": CARD_PRICE, "reveal_price": REVEAL_PRICE}
     async with db_pool.acquire() as conn:
@@ -408,7 +413,16 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
                 reply_markup=main_keyboard(await is_admin(sender_id)))
         await send_message_to_recipient(bot, recipient_id, category, body, row["id"], paid_card)
     except ValueError as e:
-        await callback.answer(str(e), show_alert=True)
+        if "Недостаточно средств" in str(e):
+            await state.clear()
+            await callback.answer()
+            if callback.message:
+                await callback.message.answer(
+                    "Недостаточно средств. Пополни баланс, чтобы купить сердечко.",
+                    reply_markup=insufficient_balance_keyboard()
+                )
+        else:
+            await callback.answer(str(e), show_alert=True)
     except Exception:
         log.exception("Failed to send anonymous message")
         await callback.answer("Не удалось отправить сообщение. Попробуйте ещё раз.", show_alert=True)
@@ -526,7 +540,15 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
         if callback.message:
             await callback.message.answer(result_text)
     except ValueError as exc:
-        await callback.answer(str(exc), show_alert=True)
+        if "Недостаточно средств" in str(exc):
+            await callback.answer()
+            if callback.message:
+                await callback.message.answer(
+                    "Недостаточно средств. Пополни баланс, чтобы раскрыть личность.",
+                    reply_markup=insufficient_balance_keyboard()
+                )
+        else:
+            await callback.answer(str(exc), show_alert=True)
     except Exception:
         log.exception("Failed to reveal author for message %s", message_id)
         await callback.answer("Не удалось выполнить операцию. Попробуй ещё раз.", show_alert=True)
