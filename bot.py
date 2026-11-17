@@ -957,7 +957,7 @@ async def partner_cabinet(message: Message, bot: Bot):
         [InlineKeyboardButton(text="📨 Поделиться ссылкой", callback_data="partner:share")],
     ])
     await message.answer(
-        "💼 МОЙ ЗАРАБОТОК\\n\\n" + signup_bonus_text,
+        "💼 МОЙ ЗАРАБОТОК\n\n" + signup_bonus_text,
         reply_markup=kb
     )
 
@@ -1000,7 +1000,7 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
         link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
         share_url = f"https://t.me/share/url?url={quote(link, safe='')}"
         signup_bonus_text = (
-            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\\n"
+            "👥 Новый реферал — 1 ₽ сразу после первого перехода по твоей ссылке\n"
             if bonus_enabled else ""
         )
         signup_bonus_footer = (
@@ -1009,14 +1009,14 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             "Начисления за покупки поступают сразу, за одобренный вывод — после подтверждения заявки."
         )
         await callback.message.answer(
-            "📖 КАК ЭТО РАБОТАЕТ?\\n\\n"
-            "1. Нажми «Поделиться ссылкой» под этим сообщением.\\n"
-            "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\\n"
-            "3. Получай процент с его операций:\\n\\n"
+            "📖 КАК ЭТО РАБОТАЕТ?\n\n"
+            "1. Нажми «Поделиться ссылкой» под этим сообщением.\n"
+            "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
+            "3. Получай процент с его операций:\n\n"
             + signup_bonus_text +
-            "💌 Покупка открытки — 10%\\n"
-            "🔎 Раскрытие личности — 10%\\n"
-            "💸 Одобренный вывод баланса — 5%\\n\\n"
+            "💌 Покупка открытки — 10%\n"
+            "🔎 Раскрытие личности — 10%\n"
+            "💸 Одобренный вывод баланса — 5%\n\n"
             + signup_bonus_footer,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)]
