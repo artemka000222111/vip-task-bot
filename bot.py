@@ -3,6 +3,7 @@ import logging
 import os
 from urllib.parse import quote
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
@@ -2206,7 +2207,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
                 for index, user in enumerate(users, 1):
                     username = f"@{user['username']}" if user["username"] else "username не указан"
                     name = user["first_name"] or "Без имени"
-                    active_at = user["last_active_at"].strftime("%d.%m.%Y %H:%M")
+                    active_at = user["last_active_at"].astimezone(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y %H:%M")
                     lines.append(f"{index}. {username} — {name}\n   Действий: {user['activity_count']} · Последняя активность: {active_at}")
                 await replace_callback_message(callback, "\n".join(lines))
     elif action == "view_messages":
