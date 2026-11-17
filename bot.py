@@ -1069,6 +1069,7 @@ async def admin_panel(message: Message, state: FSMContext):
          InlineKeyboardButton(text="➖ Списать баланс", callback_data="admin:debit")],
         [InlineKeyboardButton(text="✉️ Написать пользователю", callback_data="support:direct")],
         [InlineKeyboardButton(text="🚫 Блокировка поддержки", callback_data="support:block")],
+        [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
@@ -1083,12 +1084,62 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.update_data(balance_action=action)
         await state.set_state(AdminFlow.balance_user)
         if callback.message: await callback.message.answer("Отправь Telegram ID пользователя.")
+    elif action == "prices":
+        card_price = await get_price("card_price")
+        reveal_price = await get_price("reveal_price")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_price:.2f} ₽", callback_data="price:card")],
+            [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_price:.2f} ₽", callback_data="price:reveal")],
+        ])
+        if callback.message:
+            await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
     elif action == "stats":
         async with db_pool.acquire() as conn:
             users = await conn.fetchval("SELECT COUNT(*) FROM nobody_users")
             msgs = await conn.fetchval("SELECT COUNT(*) FROM nobody_messages")
             total = await conn.fetchval("SELECT COALESCE(SUM(balance),0) FROM nobody_users")
         if callback.message: await callback.message.answer(f"📊 Статистика\nПользователей: {users}\nСообщений: {msgs}\nБалансов пользователей: {total:.2f} ₽")
+
+@dp.callback_query(F.data.in_({"price:card", "price:reveal"}))
+async def admin_price_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    kind = "card_price" if callback.data == "price:card" else "reveal_price"
+    title = "открытки" if kind == "card_price" else "раскрытия личности"
+    await state.clear()
+    await state.update_data(price_kind=kind)
+    await state.set_state(AdminFlow.price_value)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(f"Введи новую цену {title} в рублях:")
+
+@dp.message(AdminFlow.price_value)
+async def admin_price_save(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    try:
+        value = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
+        if value < 0 or value > Decimal("1000000"):
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        await message.answer("Введи корректную цену от 0 до 1 000 000 ₽.")
+        return
+    data = await state.get_data()
+    key = data.get("price_kind")
+    if key not in ("card_price", "reveal_price"):
+        await state.clear()
+        await message.answer("Не удалось определить тип цены. Открой настройки заново.")
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO nobody_settings (key,value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            key, str(value)
+        )
+    await state.clear()
+    label = "открытки" if key == "card_price" else "раскрытия личности"
+    await message.answer(f"✅ Новая цена {label}: {value:.2f} ₽")
 
 @dp.message(AdminFlow.balance_user)
 async def admin_balance_user(message: Message, state: FSMContext):
