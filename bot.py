@@ -1852,6 +1852,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
+        [InlineKeyboardButton(text="🧹 Очистить тестовые финансы", callback_data="admin:reset_test_finances")],
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
@@ -1920,6 +1921,53 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         ])
         if callback.message:
             await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
+
+    elif action == "reset_test_finances":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚠️ Да, очистить тестовые финансы", callback_data="admin:reset_confirm")],
+            [InlineKeyboardButton(text="Отмена", callback_data="admin:reset_cancel")],
+        ])
+        if callback.message:
+            await callback.message.answer(
+                "⚠️ ПОДТВЕРЖДЕНИЕ ОЧИСТКИ\n\n"
+                "Будут обнулены балансы всех пользователей, включая администратора. "
+                "Будут удалены записи пополнений, транзакций и партнёрских начислений. "
+                "Реферальные связи, пользователи, сообщения, цены и настройки сохранятся.\n\n"
+                "Если есть незавершённые заявки на обычный или партнёрский вывод, очистка не выполнится.",
+                reply_markup=kb
+            )
+
+    elif action == "reset_cancel":
+        if callback.message:
+            await callback.message.answer("Очистка отменена.")
+
+    elif action == "reset_confirm":
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                pending_regular = await conn.fetchval(
+                    "SELECT COUNT(*) FROM nobody_withdrawals WHERE status='pending'"
+                )
+                pending_partner = await conn.fetchval(
+                    "SELECT COUNT(*) FROM nobody_partner_withdrawals WHERE status='pending'"
+                )
+                if pending_regular or pending_partner:
+                    if callback.message:
+                        await callback.message.answer(
+                            "⛔ Очистка остановлена: есть незавершённые заявки на вывод. "
+                            "Сначала обработай их в админке."
+                        )
+                    return
+                await conn.execute("UPDATE nobody_users SET balance=0")
+                await conn.execute("DELETE FROM nobody_topups")
+                await conn.execute("DELETE FROM nobody_transactions")
+                await conn.execute("DELETE FROM nobody_partner_ledger")
+        if callback.message:
+            await callback.message.answer(
+                "✅ Тестовые финансы очищены.\n\n"
+                "Балансы всех пользователей обнулены; статистика пополнений, "
+                "транзакций и партнёрских начислений сброшена. "
+                "Реферальные связи и остальная информация сохранены."
+            )
 
     elif action == "top_active":
         async with db_pool.acquire() as conn:
