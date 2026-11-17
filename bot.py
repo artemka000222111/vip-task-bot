@@ -105,6 +105,10 @@ def preview_keyboard(price: Decimal) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="card:back")],
     ])
 
+def postcard_setting_key(key: str) -> str:
+    return "heart_file_id" if key == "heart" else f"postcard_file_id_{key}"
+
+
 def insufficient_balance_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")]
@@ -284,7 +288,7 @@ async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, 
     try:
         if postcard:
             async with db_pool.acquire() as conn:
-                file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{postcard_key}")
+                file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", postcard_setting_key(postcard_key))
             if file_id:
                 await bot.send_photo(recipient_id, file_id, caption=text, reply_markup=markup)
             else:
@@ -359,7 +363,7 @@ async def select_postcard(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if key not in ("heart", "rose", "broken", "envelope", "gift"):
         await callback.answer("Неизвестная открытка.", show_alert=True); return
     async with db_pool.acquire() as conn:
-        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{key}")
+        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", postcard_setting_key(key))
     if not file_id:
         await callback.answer("Эта открытка пока не добавлена. Загляни позже!", show_alert=True); return
     await state.update_data(selected_postcard=key)
@@ -372,7 +376,7 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await callback.answer("Начните отправку заново по ссылке.", show_alert=True); return
     postcard_key = data.get("selected_postcard", "heart")
     async with db_pool.acquire() as conn:
-        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", f"postcard_file_id_{postcard_key}")
+        file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key=$1", postcard_setting_key(postcard_key))
     card_price = await get_price("card_price")
     await callback.answer()
     if callback.message:
