@@ -72,6 +72,7 @@ class WithdrawFlow(StatesGroup):
     amount = State()
     phone = State()
     bank = State()
+    confirm = State()
 
 class ReplyFlow(StatesGroup):
     text = State()
@@ -1337,28 +1338,73 @@ async def withdraw_phone(message: Message, state: FSMContext):
     await send_flow_message(message.bot, message.chat.id, state, "Укажи название банка:")
 
 @dp.message(WithdrawFlow.bank)
-async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
+async def withdraw_bank(message: Message, state: FSMContext):
     bank = (message.text or "").strip()
     if len(bank) < 2 or len(bank) > 80:
         await send_flow_message(message.bot, message.chat.id, state, "Введи название банка."); return
+    await state.update_data(withdraw_bank=bank)
+    await state.set_state(WithdrawFlow.confirm)
     data = await state.get_data()
     amount = Decimal(data["withdraw_amount"])
-    uid = message.from_user.id
+    project_percent = Decimal(data["withdraw_commission"])
+    project_fee = (amount * project_percent / Decimal("100")).quantize(Decimal("0.01"))
+    partner_fee = Decimal(data["withdraw_partner_fee"])
+    payout = Decimal(data["withdraw_payout"])
+    total_fee = project_fee + partner_fee
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить заявку", callback_data="withdraw:confirm")],
+        [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
+    ])
+    await send_flow_message(message.bot, message.chat.id, state,
+        "📋 ПРОВЕРЬ ЗАЯВКУ НА ВЫВОД\n\n"
+        f"Сумма вывода: {amount:.2f} ₽\n"
+        f"Комиссия 10%: {total_fee:.2f} ₽\n"
+        f"К получению: {payout:.2f} ₽\n\n"
+        f"Телефон: {data['withdraw_phone']}\n"
+        f"Банк: {bank}\n\n"
+        "Всё верно? Отправить заявку?",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query(F.data == "withdraw:confirm")
+async def withdraw_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    if await state.get_state() != WithdrawFlow.confirm.state:
+        await callback.answer("Заявка уже обработана или устарела.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("withdraw_amount") or not data.get("withdraw_phone") or not data.get("withdraw_bank"):
+        await state.clear()
+        await callback.answer("Не удалось прочитать данные заявки. Начни вывод заново.", show_alert=True)
+        return
+
+    amount = Decimal(data["withdraw_amount"])
+    uid = callback.from_user.id
     async with db_pool.acquire() as conn:
         async with conn.transaction():
-            updated = await conn.fetchval("UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance", uid, amount)
+            updated = await conn.fetchval(
+                "UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance",
+                uid, amount
+            )
             if updated is None:
                 await state.clear()
-                await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
+                await callback.answer("Недостаточно средств.", show_alert=True)
+                if callback.message:
+                    await replace_callback_message(callback, "Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard())
+                return
             wid = await conn.fetchval(
                 """INSERT INTO nobody_withdrawals
                    (user_id,amount,phone,bank,commission_percent,payout_amount,referrer_id,referrer_percent,referrer_commission)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
-                uid, amount, data["withdraw_phone"], bank, Decimal(data["withdraw_commission"]),
+                uid, amount, data["withdraw_phone"], data["withdraw_bank"], Decimal(data["withdraw_commission"]),
                 Decimal(data["withdraw_payout"]), data.get("withdraw_partner_id"),
                 Decimal(data["withdraw_partner_percent"]), Decimal(data["withdraw_partner_fee"])
             )
-            await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Заявка на вывод средств',$3)", uid, -amount, f"withdraw:{wid}")
+            await conn.execute(
+                "INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Заявка на вывод средств',$3)",
+                uid, -amount, f"withdraw:{wid}"
+            )
+
     await state.clear()
     project_percent = Decimal(data["withdraw_commission"])
     partner_percent = Decimal(data["withdraw_partner_percent"])
@@ -1366,19 +1412,26 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     partner_fee = Decimal(data["withdraw_partner_fee"])
     payout = Decimal(data["withdraw_payout"])
     total_fee = project_fee + partner_fee
-    await send_flow_message(message.bot, message.chat.id, state, 
-        f"✅ Заявка на вывод №{wid} отправлена.\n\n"
-        f"Сумма вывода: {amount:.2f} ₽\nКомиссия 10%: {total_fee:.2f} ₽\n"
-        + f"К получению: {payout:.2f} ₽\n\nСредства списаны до проверки."
-    )
-    user = message.from_user
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"), InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")]])
+    await callback.answer("Заявка отправлена.")
+    if callback.message:
+        await replace_callback_message(callback,
+            f"✅ Заявка на вывод №{wid} отправлена.\n\n"
+            f"Сумма вывода: {amount:.2f} ₽\n"
+            f"Комиссия 10%: {total_fee:.2f} ₽\n"
+            f"К получению: {payout:.2f} ₽\n\n"
+            "Средства списаны до проверки."
+        )
+    user = callback.from_user
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"),
+        InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")
+    ]])
     await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\n"
         f"Сумма списания с баланса: {amount:.2f} ₽\n"
         + (f"Комиссия рефереру (5%): {partner_fee:.2f} ₽\n" if partner_percent else "Комиссия рефереру: 0.00 ₽ (нет реферера)\n")
         + f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
         f"ИТОГО ПЕРЕВЕСТИ ПОЛЬЗОВАТЕЛЮ: {payout:.2f} ₽\n"
-        f"Телефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\n"
+        f"Телефон: {data['withdraw_phone']}\nБанк: {data['withdraw_bank']}\nПользователь: {user.full_name}\n"
         f"Username: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("withdraw:approve:"))
