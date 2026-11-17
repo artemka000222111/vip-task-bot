@@ -1961,7 +1961,7 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.broadcast_text)
         if callback.message:
             await callback.message.answer(
-                "📢 РАССЫЛКА\\n\\nОтправь текст, который нужно разослать всем пользователям бота.\\n"
+                "📢 РАССЫЛКА\n\nОтправь текст, который нужно разослать всем пользователям бота.\n"
                 "Можно использовать эмодзи. Для отмены открой админ-панель."
             )
 
@@ -1985,9 +1985,9 @@ async def admin_broadcast_text(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
     ])
     await message.answer(
-        "👀 ПРЕДПРОСМОТР РАССЫЛКИ\\n\\n"
+        "👀 ПРЕДПРОСМОТР РАССЫЛКИ\n\n"
         + body
-        + "\\n\\nОтправить это сообщение всем пользователям?",
+        + "\n\nОтправить это сообщение всем пользователям?",
         reply_markup=kb
     )
 
@@ -2036,9 +2036,9 @@ async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot
 
     total = len(user_ids)
     report = (
-        "✅ РАССЫЛКА ЗАВЕРШЕНА\\n\\n"
-        f"👥 Всего пользователей: {total}\\n"
-        f"📨 Успешно получили: {sent_count}\\n"
+        "✅ РАССЫЛКА ЗАВЕРШЕНА\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"📨 Успешно получили: {sent_count}\n"
         f"⚠️ Не удалось доставить: {failed_count}"
     )
     if status_message:
