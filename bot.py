@@ -514,7 +514,12 @@ async def topup_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TopUpFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("💳 Введи сумму пополнения в рублях:")
+        await callback.message.answer(
+            "💳 Введи сумму пополнения в рублях:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")]
+            ])
+        )
 
 @dp.message(TopUpFlow.amount)
 async def topup_amount(message: Message, state: FSMContext):
@@ -527,7 +532,12 @@ async def topup_amount(message: Message, state: FSMContext):
         return
     await state.update_data(topup_amount=str(amount))
     await state.set_state(TopUpFlow.sender)
-    await message.answer("Укажи имя и фамилию отправителя — как будет указано в переводе:")
+    await message.answer(
+        "Укажи имя и фамилию отправителя — как будет указано в переводе:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")]
+        ])
+    )
 
 @dp.message(TopUpFlow.sender)
 async def topup_sender(message: Message, state: FSMContext):
@@ -541,7 +551,7 @@ async def topup_sender(message: Message, state: FSMContext):
     amount = Decimal(data["topup_amount"])
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Я отправил оплату", callback_data="topup:sent")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="topup:cancel")],
+        [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")],
     ])
     await message.answer(
         f"💳 Пополнение баланса\n\nСумма: {amount:.2f} ₽\nОтправитель: {sender_name}\n\n"
