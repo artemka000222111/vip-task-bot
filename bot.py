@@ -2043,11 +2043,11 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         if callback.message:
             await callback.message.answer(
                 "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
-                                f"Статус бонуса 1 ₽: {status}\n\n"
-                                f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
-                                f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
-                                "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
-                                "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
+                    f"Статус бонуса 1 ₽: {status}\n\n"
+                    f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
+                    f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
+                    "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
+                    "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
                 reply_markup=kb
             )
 
@@ -2120,11 +2120,11 @@ async def admin_referrals_toggle(callback: CallbackQuery):
             pass
         await callback.message.answer(
             "👥 УПРАВЛЕНИЕ РЕФЕРАЛАМИ\n\n"
-                            f"Статус бонуса 1 ₽: {status}\n\n"
-                            f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
-                            f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
-                            "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
-                            "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
+                f"Статус бонуса 1 ₽: {status}\n\n"
+                f"👥 Всего рефералов: {int(referrals_total or 0)}\n"
+                f"💰 Всего выплачено бонусов: {Decimal(bonus_total or 0):.2f} ₽\n\n"
+                "При отключении бонус 1 ₽ новым рефералам начисляться не будет.\n"
+                "Комиссии 10% с покупок и 5% с одобренных выводов продолжат работать.",
             reply_markup=kb
         )
 
