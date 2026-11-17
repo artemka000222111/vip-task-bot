@@ -164,7 +164,22 @@ async def send_flow_message(bot: Bot, chat_id: int, state: FSMContext, text: str
                             reply_markup=None) -> Message:
     await clear_flow_message(bot, chat_id, state)
     sent = await bot.send_message(chat_id, text, reply_markup=add_menu_back_button(reply_markup))
-    await state.update_data(flow_bot_message_id=sent.message_id)
+    await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
+    return sent
+
+
+async def send_ui_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
+                          reply_markup=None) -> Message:
+    data = await state.get_data()
+    previous_ids = {data.get("flow_bot_message_id"), data.get("ui_bot_message_id")}
+    for message_id in previous_ids:
+        if message_id:
+            try:
+                await bot.delete_message(chat_id, message_id)
+            except Exception:
+                pass
+    sent = await bot.send_message(chat_id, text, reply_markup=add_menu_back_button(reply_markup))
+    await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
     return sent
 
 def add_menu_back_button(reply_markup):
@@ -205,6 +220,13 @@ class FlowInputCleanupMiddleware(BaseMiddleware):
         state = data.get("state")
         if isinstance(event, Message) and event.chat.type == "private" and (event.text or "").strip() == "⬅️ Главное меню":
             if state is not None:
+                saved = await state.get_data()
+                for message_id in {saved.get("flow_bot_message_id"), saved.get("ui_bot_message_id")}:
+                    if message_id:
+                        try:
+                            await event.bot.delete_message(event.chat.id, message_id)
+                        except Exception:
+                            pass
                 await state.clear()
             await event.answer(
                 "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
@@ -216,18 +238,12 @@ class FlowInputCleanupMiddleware(BaseMiddleware):
                 pass
             return None
 
-        active_flow = False
-        if state is not None:
-            try:
-                active_flow = await state.get_state() is not None
-            except Exception:
-                active_flow = False
         result = await handler(event, data)
-        if active_flow and isinstance(event, Message) and event.chat.type == "private":
+        if isinstance(event, Message) and event.chat.type == "private":
             try:
                 await event.delete()
             except Exception:
-                log.debug("Could not delete flow input message %s", event.message_id)
+                log.debug("Could not delete incoming message %s", event.message_id)
         return result
 
 
@@ -884,10 +900,11 @@ async def callback_return_to_main_menu(callback: CallbackQuery, state: FSMContex
 
 
 @dp.message(F.text == "🔗 Моя ссылка")
-async def my_link(message: Message, bot: Bot):
+async def my_link(message: Message, bot: Bot, state: FSMContext):
     me = await bot.get_me()
     link = f"https://t.me/{me.username}?start=to_{message.from_user.id}"
-    await message.answer(
+    await send_ui_message(
+        bot, message.chat.id, state,
         "🔥 VIP NOBODY — анонимность, подарки и заработок!\n\n"
         "💌 Отправляй анонимные сообщения.\n"
         "🎁 Создавай красивые открытки.\n"
@@ -1306,13 +1323,13 @@ async def partner_withdraw_reject(callback: CallbackQuery):
 
 
 @dp.message(F.text == "💰 Баланс")
-async def balance(message: Message):
+async def balance(message: Message, state: FSMContext):
     amount = await get_balance(message.from_user.id)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="topup:start")],
         [InlineKeyboardButton(text="💸 Вывести средства", callback_data="withdraw:start")]
     ])
-    await message.answer(f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=add_menu_back_button(kb))
+    await send_ui_message(message.bot, message.chat.id, state, f"💰 Твой баланс: {amount:.2f} ₽", reply_markup=kb)
 
 @dp.callback_query(F.data == "withdraw:start")
 async def withdraw_start(callback: CallbackQuery, state: FSMContext):
@@ -1698,18 +1715,19 @@ async def topup_reject(callback: CallbackQuery, bot: Bot):
         log.exception("Could not notify user about rejected top-up %s", topup_id)
 
 @dp.message(F.text == "👤 Профиль")
-async def profile(message: Message):
+async def profile(message: Message, state: FSMContext):
     user = message.from_user
-    await message.answer(f"👤 Профиль VIP NOBODY\n\nИмя: {user.first_name or 'не указано'}\nUsername: @{user.username if user.username else 'не указан'}\nTelegram ID: {user.id}")
+    await send_ui_message(message.bot, message.chat.id, state, f"👤 Профиль VIP NOBODY\n\nИмя: {user.first_name or 'не указано'}\nUsername: @{user.username if user.username else 'не указан'}\nTelegram ID: {user.id}")
 
 @dp.message(F.text == "ℹ️ Помощь")
-async def help_message(message: Message):
+async def help_message(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🆘 Обратиться в поддержку", callback_data="support:start")]
     ])
     card_price = await get_price("card_price")
     reveal_price = await get_price("reveal_price")
-    await message.answer(
+    await send_ui_message(
+        message.bot, message.chat.id, state,
         "💜 VIP NOBODY — место для анонимных признаний\n\n"
         "Здесь можно отправлять людям анонимные сообщения, признаваться в чувствах, "
         "задавать вопросы, делать комплименты или просто оставлять интересные послания.\n\n"
@@ -2082,7 +2100,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
     ])
-    await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=add_menu_back_button(kb))
+    await send_ui_message(message.bot, message.chat.id, state, "🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
 @dp.message(Command("setref"))
 async def admin_set_referrer(message: Message):
