@@ -767,8 +767,21 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(
             f"💸 Вывод средств\n\nКомиссия на вывод: {commission:.2f}%\n"
             "Комиссия будет удержана из суммы вывода. На карту поступит сумма за вычетом комиссии.\n\n"
-            "Введи сумму, которую хочешь списать с баланса:"
+            "Введи сумму от 100 ₽:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
+            ])
         )
+
+@dp.callback_query(F.data == "withdraw:cancel")
+async def withdraw_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+    await callback.answer("Вывод отменён.")
 
 @dp.message(WithdrawFlow.amount)
 async def withdraw_amount(message: Message, state: FSMContext):
