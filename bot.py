@@ -285,6 +285,9 @@ async def init_database() -> None:
         """)
         await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS commission_percent NUMERIC(5,2) NOT NULL DEFAULT 10.00")
         await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS payout_amount NUMERIC(12,2) NOT NULL DEFAULT 0")
+        await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS referrer_id BIGINT REFERENCES nobody_users(telegram_id)")
+        await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS referrer_percent NUMERIC(5,2) NOT NULL DEFAULT 0")
+        await conn.execute("ALTER TABLE nobody_withdrawals ADD COLUMN IF NOT EXISTS referrer_commission NUMERIC(12,2) NOT NULL DEFAULT 0")
         await conn.execute("UPDATE nobody_withdrawals SET payout_amount=amount WHERE payout_amount=0")
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_topups (
@@ -702,11 +705,20 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
                         INSERT INTO nobody_transactions (user_id,amount,kind,description,ref)
                         VALUES ($1,$2,'debit','Покупка открытки-сердечка',$3)
                     """, sender_id, -card_price, f"card:{sender_id}:{callback.id}")
+                    referral_commission = await add_partner_commission(
+                        conn, sender_id, card_price, f"ref-card:{sender_id}:{callback.id}",
+                        "Комиссия за покупку открытки приглашённым пользователем"
+                    )
                 row = await conn.fetchrow("""
                     INSERT INTO nobody_messages (recipient_id,sender_id,category,body,postcard)
                     VALUES ($1,$2,$3,$4,$5) RETURNING id
                 """, recipient_id, sender_id, category, body, paid_card)
         await state.clear()
+        if paid_card and referral_commission:
+            try:
+                await bot.send_message(referral_commission[0], f"💰 Вам начислено {referral_commission[1]:.2f} ₽ за покупку открытки приглашённым пользователем.")
+            except Exception:
+                log.exception("Could not notify referral partner %s", referral_commission[0])
         await callback.answer("Сообщение отправлено!")
         if callback.message:
             await callback.message.answer(
@@ -830,7 +842,16 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                         "UPDATE nobody_messages SET revealed=TRUE WHERE id=$1 AND recipient_id=$2",
                         message_id, user_id
                     )
+                    referral_commission = await add_partner_commission(
+                        conn, user_id, reveal_price, f"ref-reveal:{message_id}:{user_id}",
+                        "Комиссия за раскрытие личности приглашённым пользователем"
+                    )
                     already_revealed = False
+        if not already_revealed and referral_commission:
+            try:
+                await bot.send_message(referral_commission[0], f"💰 Вам начислено {referral_commission[1]:.2f} ₽ за раскрытие личности приглашённым пользователем.")
+            except Exception:
+                log.exception("Could not notify referral partner %s", referral_commission[0])
         await callback.answer("Личность раскрыта!" if not already_revealed else "Уже раскрыто.")
         username = f"@{author['username']}" if author and author["username"] else "не указан"
         full_name = " ".join(part for part in [author["first_name"], author["last_name"]] if part) if author else "неизвестно"
@@ -869,10 +890,14 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(WithdrawFlow.amount)
     await callback.answer()
     if callback.message:
-        commission = await get_price("withdraw_commission")
+        async with db_pool.acquire() as conn:
+            referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", callback.from_user.id)
+        project_percent = Decimal("5") if referrer_id else Decimal("10")
+        partner_percent = Decimal("5") if referrer_id else Decimal("0")
         await callback.message.answer(
-            f"💸 Вывод средств\n\nКомиссия на вывод: {commission:.2f}%\n"
-            "Комиссия будет удержана из суммы вывода. На карту поступит сумма за вычетом комиссии.\n\n"
+            f"💸 Вывод средств\n\nКомиссия проекта: {project_percent:.0f}%"
+            + (f"\nКомиссия рефереру: {partner_percent:.0f}%" if partner_percent else "")
+            + "\nНа карту поступит 90% от суммы вывода. Комиссии начисляются после одобрения заявки.\n\n"
             "Введи сумму от 100 ₽:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
@@ -904,14 +929,24 @@ async def withdraw_amount(message: Message, state: FSMContext):
     if await get_balance(message.from_user.id) < amount:
         await state.clear()
         await message.answer("Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
-    commission = await get_price("withdraw_commission")
-    payout = (amount * (Decimal("100") - commission) / Decimal("100")).quantize(Decimal("0.01"))
-    await state.update_data(withdraw_amount=str(amount), withdraw_commission=str(commission), withdraw_payout=str(payout))
+    async with db_pool.acquire() as conn:
+        referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", message.from_user.id)
+    project_percent = Decimal("5") if referrer_id else Decimal("10")
+    partner_percent = Decimal("5") if referrer_id else Decimal("0")
+    project_fee = (amount * project_percent / Decimal("100")).quantize(Decimal("0.01"))
+    partner_fee = (amount * partner_percent / Decimal("100")).quantize(Decimal("0.01"))
+    payout = amount - project_fee - partner_fee
+    await state.update_data(
+        withdraw_amount=str(amount), withdraw_commission=str(project_percent),
+        withdraw_partner_percent=str(partner_percent), withdraw_partner_id=referrer_id,
+        withdraw_partner_fee=str(partner_fee), withdraw_payout=str(payout)
+    )
     await state.set_state(WithdrawFlow.phone)
     await message.answer(
         f"Сумма вывода: {amount:.2f} ₽\n"
-        f"Комиссия ({commission:.2f}%): {amount - payout:.2f} ₽\n"
-        f"На карту поступит: {payout:.2f} ₽\n\n"
+        f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
+        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
+        + f"На карту поступит: {payout:.2f} ₽\n\n"
         "Теперь укажи номер телефона для получения перевода:"
     )
 
@@ -939,20 +974,33 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
             if updated is None:
                 await state.clear()
                 await message.answer("Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
-            wid = await conn.fetchval("INSERT INTO nobody_withdrawals (user_id,amount,phone,bank,commission_percent,payout_amount) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", uid, amount, data["withdraw_phone"], bank, Decimal(data["withdraw_commission"]), Decimal(data["withdraw_payout"]))
+            wid = await conn.fetchval(
+                """INSERT INTO nobody_withdrawals
+                   (user_id,amount,phone,bank,commission_percent,payout_amount,referrer_id,referrer_percent,referrer_commission)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id""",
+                uid, amount, data["withdraw_phone"], bank, Decimal(data["withdraw_commission"]),
+                Decimal(data["withdraw_payout"]), data.get("withdraw_partner_id"),
+                Decimal(data["withdraw_partner_percent"]), Decimal(data["withdraw_partner_fee"])
+            )
             await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Заявка на вывод средств',$3)", uid, -amount, f"withdraw:{wid}")
     await state.clear()
-    commission = Decimal(data["withdraw_commission"])
+    project_percent = Decimal(data["withdraw_commission"])
+    partner_percent = Decimal(data["withdraw_partner_percent"])
+    project_fee = (amount * project_percent / Decimal("100")).quantize(Decimal("0.01"))
+    partner_fee = Decimal(data["withdraw_partner_fee"])
     payout = Decimal(data["withdraw_payout"])
     await message.answer(
         f"✅ Заявка на вывод №{wid} отправлена.\n\n"
-        f"Сумма списания: {amount:.2f} ₽\nКомиссия ({commission:.2f}%): {amount - payout:.2f} ₽\n"
-        f"К получению: {payout:.2f} ₽\n\nСредства списаны до проверки."
+        f"Сумма списания: {amount:.2f} ₽\nКомиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
+        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
+        + f"К получению: {payout:.2f} ₽\n\nСредства списаны до проверки."
     )
     user = message.from_user
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"), InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")]])
     await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\nСписать с баланса: {amount:.2f} ₽\n"
-        f"Комиссия ({commission:.2f}%): {amount - payout:.2f} ₽\nК выплате: {payout:.2f} ₽\n"
+        f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
+        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
+        + f"К выплате: {payout:.2f} ₽\n"
         f"Телефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\n"
         f"Username: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
 
