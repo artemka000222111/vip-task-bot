@@ -183,8 +183,8 @@ async def send_ui_message(bot: Bot, chat_id: int, state: FSMContext, text: str,
     return sent
 
 def add_menu_back_button(reply_markup):
-    if reply_markup is None:
-        return None
+    if reply_markup is None or not isinstance(reply_markup, InlineKeyboardMarkup):
+        return reply_markup
     rows = [list(row) for row in reply_markup.inline_keyboard]
     if not any(
         button.callback_data == "nav:home"
@@ -228,10 +228,12 @@ class FlowInputCleanupMiddleware(BaseMiddleware):
                         except Exception:
                             pass
                 await state.clear()
-            await event.answer(
+            sent = await event.answer(
                 "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
                 reply_markup=main_keyboard(await is_admin(event.from_user.id))
             )
+            if state is not None:
+                await state.update_data(flow_bot_message_id=sent.message_id, ui_bot_message_id=sent.message_id)
             try:
                 await event.delete()
             except Exception:
@@ -497,6 +499,13 @@ async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, 
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext, bot: Bot):
+    old_data = await state.get_data()
+    for old_message_id in {old_data.get("flow_bot_message_id"), old_data.get("ui_bot_message_id")}:
+        if old_message_id:
+            try:
+                await bot.delete_message(message.chat.id, old_message_id)
+            except Exception:
+                pass
     await state.clear()
     if not message.from_user:
         return
@@ -570,15 +579,18 @@ async def start(message: Message, state: FSMContext, bot: Bot):
             return
         await state.update_data(recipient_id=recipient_id)
         await state.set_state(AnonymousFlow.category)
-        sent = await message.answer(
+        await send_flow_message(
+            bot, message.chat.id, state,
             "Выберите категорию анонимного сообщения.\n\n"
             "Учти, твою личность могут раскрыть.",
-            reply_markup=category_keyboard())
-        await state.update_data(flow_bot_message_id=sent.message_id)
+            reply_markup=category_keyboard()
+        )
         return
-    await message.answer(
+    await send_ui_message(
+        bot, message.chat.id, state,
         "👋 Добро пожаловать в VIP NOBODY!\n\nПоделись своей ссылкой, чтобы получить анонимное сообщение.",
-        reply_markup=main_keyboard(await is_admin(message.from_user.id)))
+        reply_markup=main_keyboard(await is_admin(message.from_user.id))
+    )
 
 @dp.callback_query(F.data.startswith("category:"))
 async def choose_category(callback: CallbackQuery, state: FSMContext):
@@ -2087,7 +2099,6 @@ async def support_block_target(message: Message, state: FSMContext):
 async def admin_panel(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id):
         await message.answer("Нет доступа."); return
-    await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Начислить баланс", callback_data="admin:credit"),
          InlineKeyboardButton(text="➖ Списать баланс", callback_data="admin:debit")],
