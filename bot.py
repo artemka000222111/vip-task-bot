@@ -369,6 +369,93 @@ async def receive_text(message: Message, state: FSMContext):
                             "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай открытку и отправляй красиво!",
                             reply_markup=postcard_keyboard(card_price))
 
+@dp.callback_query(F.data == "card:gift")
+async def gift_start(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("recipient_id") or not data.get("body"):
+        await callback.answer("Начни отправку сообщения заново.", show_alert=True); return
+    await state.set_state(GiftFlow.amount)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("🎁 Денежный подарок\n\nУкажи сумму подарка — не менее 10 ₽. Деньги будут переведены получателю с твоего баланса.")
+
+@dp.message(GiftFlow.amount)
+async def gift_amount(message: Message, state: FSMContext):
+    try:
+        amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
+        if amount < Decimal("10") or amount > Decimal("1000000"): raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        await message.answer("Минимальная сумма подарка — 10 ₽. Введи корректную сумму."); return
+    if await get_balance(message.from_user.id) < amount:
+        await message.answer("Недостаточно средств для такого подарка.", reply_markup=insufficient_balance_keyboard())
+        await state.clear(); return
+    await state.update_data(gift_amount=str(amount))
+    await state.set_state(GiftFlow.text)
+    await message.answer("Напиши текст, который будет приложен к денежному подарку:")
+
+@dp.message(GiftFlow.text)
+async def gift_text(message: Message, state: FSMContext):
+    body = (message.text or "").strip()
+    if not body or len(body) > 1000:
+        await message.answer("Напиши текст от 1 до 1000 символов."); return
+    await state.update_data(gift_body=body)
+    await state.set_state(GiftFlow.visibility)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎭 Анонимно", callback_data="gift:visibility:anonymous")],
+        [InlineKeyboardButton(text="👤 Показать, кто отправил", callback_data="gift:visibility:visible")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="gift:cancel")]
+    ])
+    await message.answer("Как получатель увидит подарок?", reply_markup=kb)
+
+@dp.callback_query(F.data == "gift:cancel")
+async def gift_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer("Подарок отменён.")
+    if callback.message: await callback.message.answer("Подарок отменён. Можешь отправить обычное сообщение.")
+
+@dp.callback_query(F.data.startswith("gift:visibility:"))
+async def gift_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if not data.get("gift_amount") or not data.get("gift_body") or not data.get("recipient_id"):
+        await callback.answer("Данные подарка потерялись. Начни заново.", show_alert=True); return
+    anonymous = callback.data.endswith(":anonymous")
+    sender_id = callback.from_user.id
+    recipient_id = int(data["recipient_id"])
+    amount = Decimal(data["gift_amount"])
+    if sender_id == recipient_id:
+        await callback.answer("Нельзя отправить подарок самому себе.", show_alert=True); return
+    gift_id = None
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                sender_balance = await conn.fetchval("UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance", sender_id, amount)
+                if sender_balance is None: raise ValueError("Недостаточно средств")
+                await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", recipient_id, amount)
+                gift_id = await conn.fetchval("INSERT INTO nobody_gifts (sender_id,recipient_id,amount,body,anonymous,ref) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", sender_id, recipient_id, amount, data["gift_body"], anonymous, f"gift:{callback.id}")
+                await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Денежный подарок',$3)", sender_id, -amount, f"gift-send:{callback.id}")
+                await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'credit','Получен денежный подарок',$3)", recipient_id, amount, f"gift-receive:{callback.id}")
+    except ValueError:
+        await callback.answer("Недостаточно средств. Пополни баланс.", show_alert=True)
+        if callback.message:
+            await callback.message.answer("Недостаточно средств для подарка.", reply_markup=insufficient_balance_keyboard())
+        await state.clear(); return
+    await state.clear()
+    await callback.answer("Подарок отправлен!")
+    sender = callback.from_user
+    sender_label = "Отправитель пожелал остаться анонимным." if anonymous else f"Отправитель: {sender.full_name}" + (f" (@{sender.username})" if sender.username else "")
+    caption = f"🎁 Тебе подарили деньги!\n\nСумма: {amount:.2f} ₽\n\n{data['gift_body']}\n\n{sender_label}"
+    async with db_pool.acquire() as conn:
+        photo_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='postcard_file_id_gift'")
+    try:
+        if photo_id:
+            await bot.send_photo(recipient_id, photo_id, caption=caption)
+        else:
+            await bot.send_message(recipient_id, caption)
+    except Exception:
+        log.exception("Could not deliver gift %s to recipient %s", gift_id, recipient_id)
+    if callback.message:
+        await callback.message.answer(f"✅ Денежный подарок на {amount:.2f} ₽ отправлен!\nТекущий баланс: {await get_balance(sender_id):.2f} ₽")
+
 @dp.callback_query(F.data.startswith("card:select:"))
 async def select_postcard(callback: CallbackQuery, state: FSMContext, bot: Bot):
     key = callback.data.rsplit(":", 1)[1]
