@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from urllib.parse import quote
 from decimal import Decimal, InvalidOperation
 
 import asyncpg
@@ -941,18 +942,24 @@ async def partner_analytics(callback: CallbackQuery):
 
 
 @dp.callback_query(F.data == "partner:howto")
-async def partner_howto(callback: CallbackQuery):
+async def partner_howto(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     if callback.message:
+        me = await bot.get_me()
+        link = f"https://t.me/{me.username}?start=ref_{callback.from_user.id}"
+        share_url = f"https://t.me/share/url?url={quote(link, safe='')}"
         await callback.message.answer(
             "📖 КАК ЭТО РАБОТАЕТ?\n\n"
-            "1. Нажми «Поделиться ссылкой» в этом разделе.\n"
+            "1. Нажми «Поделиться ссылкой» под этим сообщением.\n"
             "2. Отправь ссылку друзьям. После запуска бота по ней они станут твоими рефералами.\n"
             "3. Получай процент с его операций:\n\n"
             "💌 Покупка открытки — 10%\n"
             "🔎 Раскрытие личности — 10%\n"
             "💸 Одобренный вывод баланса — 5%\n\n"
-            "Начисления за покупки поступают сразу, за вывод — после одобрения заявки."
+            "Начисления за покупки поступают сразу, за вывод — после одобрения заявки.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)]
+            ])
         )
 
 
