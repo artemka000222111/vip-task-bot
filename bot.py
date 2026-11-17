@@ -53,6 +53,7 @@ class AdminFlow(StatesGroup):
     balance_user = State()
     balance_amount = State()
     price_value = State()
+    message_view_user = State()
 
 class TopUpFlow(StatesGroup):
     amount = State()
@@ -1465,6 +1466,8 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🚫 Блокировка поддержки", callback_data="support:block")],
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
+        [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -1495,6 +1498,70 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         ])
         if callback.message:
             await callback.message.answer("📊 СТАТИСТИКА VIP NOBODY\n\nВыбери раздел:", reply_markup=kb)
+
+    elif action == "top_active":
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch(
+                "SELECT username, first_name, last_active_at "
+                "FROM nobody_users WHERE last_active_at IS NOT NULL "
+                "ORDER BY last_active_at DESC LIMIT 10"
+            )
+        if callback.message:
+            if not users:
+                await callback.message.answer("Пока нет активных пользователей.")
+            else:
+                lines = ["🏆 ТОП 10 АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ\n"]
+                for index, user in enumerate(users, 1):
+                    username = f"@{user['username']}" if user["username"] else "username не указан"
+                    name = user["first_name"] or "Без имени"
+                    active_at = user["last_active_at"].strftime("%d.%m.%Y %H:%M")
+                    lines.append(f"{index}. {username} — {name}\n   Активность: {active_at}")
+                await callback.message.answer("\n".join(lines))
+    elif action == "view_messages":
+        await state.clear()
+        await state.set_state(AdminFlow.message_view_user)
+        if callback.message:
+            await callback.message.answer("Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
+
+
+@dp.message(AdminFlow.message_view_user)
+async def admin_view_user_messages(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return
+    username = (message.text or "").strip().lstrip("@").lower()
+    if not username or len(username) > 64 or any(ch.isspace() for ch in username):
+        await message.answer("Введи корректный @username пользователя.")
+        return
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT telegram_id, username FROM nobody_users WHERE LOWER(username)=$1",
+            username
+        )
+        rows = []
+        if user:
+            rows = await conn.fetch(
+                "SELECT category, body, created_at FROM nobody_messages "
+                "WHERE recipient_id=$1 ORDER BY created_at DESC, id DESC LIMIT 10",
+                user["telegram_id"]
+            )
+    if not user:
+        await message.answer("Пользователь с таким username не найден. Проверь написание.")
+        return
+    await state.clear()
+    if not rows:
+        await message.answer(f"У @{user['username']} пока нет полученных анонимных сообщений.")
+        return
+    lines = [f"👁 ПОСЛЕДНИЕ 10 СООБЩЕНИЙ ДЛЯ @{user['username']}\n"]
+    for index, row in enumerate(rows, 1):
+        category = CATEGORIES.get(row["category"], "💬 Другое")
+        created = row["created_at"].strftime("%d.%m.%Y %H:%M")
+        body = row["body"].strip()
+        if len(body) > 300:
+            body = body[:300].rstrip() + "…"
+        lines.append(f"{index}. {category} · {created}\n{body}")
+    await message.answer("\n\n".join(lines))
+
 
 
 @dp.callback_query(F.data == "stats:people")
