@@ -723,7 +723,7 @@ async def support_start(callback: CallbackQuery, state: FSMContext):
         await state.set_state(SupportFlow.user_reply)
         if callback.message:
             await callback.message.answer(
-                f"У тебя уже есть открытый диалог с поддержкой №{ticket_id}. Если поддержка ответит, здесь появится кнопка для ответа."
+                "У тебя уже есть открытый диалог с поддержкой. Если поддержка ответит, здесь появится кнопка для ответа."
             )
     else:
         await state.set_state(SupportFlow.new_text)
@@ -740,7 +740,7 @@ async def notify_admin_support(bot: Bot, ticket_id: int, user_id: int, body: str
     prefix = "🆘 НОВОЕ ОБРАЩЕНИЕ" if first else "💬 СООБЩЕНИЕ В ПОДДЕРЖКУ"
     await bot.send_message(
         ADMIN_ID,
-        f"{prefix} №{ticket_id}\n\nПользователь: {name}\nUsername: {username}\nTelegram ID: {user_id}\n\n{body}",
+        f"{prefix}\n\nПользователь: {name}\nUsername: {username}\nTelegram ID: {user_id}\n\n{body}",
         reply_markup=support_admin_keyboard(ticket_id)
     )
 
@@ -759,7 +759,7 @@ async def support_new_text(message: Message, state: FSMContext, bot: Bot):
         await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
     await state.set_state(SupportFlow.user_reply)
     await message.answer(
-        f"✅ Обращение №{ticket_id} отправлено администрации. Ожидай ответа поддержки."
+        "✅ Обращение отправлено администрации. Ожидай ответа поддержки."
     )
     try:
         await notify_admin_support(bot, ticket_id, message.from_user.id, body, True)
@@ -824,7 +824,7 @@ async def support_admin_reply_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SupportFlow.admin_reply)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(f"Введи ответ пользователю по обращению №{ticket_id}:")
+        await callback.message.answer("Введи ответ пользователю:")
 
 @dp.message(SupportFlow.admin_reply)
 async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
@@ -850,10 +850,10 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
             await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
     try:
         await bot.send_message(
-            ticket["user_id"], f"💬 Ответ поддержки по обращению №{ticket_id}:\n\n{body}{SUPPORT_SIGNATURE}",
+            ticket["user_id"], f"💬 Ответ поддержки:\n\n{body}{SUPPORT_SIGNATURE}",
             reply_markup=support_user_keyboard(ticket_id)
         )
-        await message.answer(f"✅ Ответ по обращению №{ticket_id} отправлен.")
+        await message.answer("✅ Ответ отправлен.")
     except Exception:
         log.exception("Could not deliver support response for ticket %s", ticket_id)
         await message.answer("Не удалось доставить ответ пользователю.")
@@ -877,7 +877,7 @@ async def support_close(callback: CallbackQuery, bot: Bot):
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
     try:
-        await bot.send_message(user_id, f"🔒 Диалог с поддержкой №{ticket_id} завершён администрацией.")
+        await bot.send_message(user_id, "🔒 Диалог с поддержкой завершён администрацией.")
     except Exception:
         log.exception("Could not notify user about closed support ticket %s", ticket_id)
 
