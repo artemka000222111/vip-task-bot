@@ -57,9 +57,12 @@ class TopUpFlow(StatesGroup):
     sender = State()
     confirm = State()
 
+class ReplyFlow(StatesGroup):
+    text = State()
+
 def main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text="📩 Входящие"), KeyboardButton(text="🔗 Моя ссылка")],
+        [KeyboardButton(text="🔗 Моя ссылка")],
         [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="👤 Профиль")],
         [KeyboardButton(text="ℹ️ Помощь")],
     ]
@@ -179,18 +182,25 @@ async def change_balance(user_id: int, amount: Decimal, description: str, ref: s
                 await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", user_id, amount)
     return True
 
+def message_actions_keyboard(message_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"msg:reply:{message_id}")],
+        [InlineKeyboardButton(text="🔎 Раскрыть личность — 50 ₽", callback_data=f"msg:reveal:{message_id}")],
+    ])
+
 async def send_message_to_recipient(bot: Bot, recipient_id: int, category: str, body: str, message_id: int, postcard: bool):
     text = f"💌 Новая анонимка!\n\n{CATEGORIES.get(category, CATEGORIES['other'])}\n\n{body}\n\nСообщение #{message_id}"
+    markup = message_actions_keyboard(message_id)
     try:
         if postcard:
             async with db_pool.acquire() as conn:
                 file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='heart_file_id'")
             if file_id:
-                await bot.send_photo(recipient_id, file_id, caption=text)
+                await bot.send_photo(recipient_id, file_id, caption=text, reply_markup=markup)
             else:
-                await bot.send_message(recipient_id, "❤️ Открытка-сердечко\n\n" + text)
+                await bot.send_message(recipient_id, "❤️ Открытка-сердечко\n\n" + text, reply_markup=markup)
         else:
-            await bot.send_message(recipient_id, text)
+            await bot.send_message(recipient_id, text, reply_markup=markup)
     except Exception:
         log.exception("Could not notify recipient %s", recipient_id)
 
@@ -334,15 +344,108 @@ async def my_link(message: Message, bot: Bot):
     link = f"https://t.me/{me.username}?start=to_{message.from_user.id}"
     await message.answer("💜 Есть кое-что, что давно хотел сказать?\nПризнайся, задай вопрос или отправь комплимент — можешь остаться загадкой 👀\n\n👇 Напиши мне анонимно:\n" + link + "\n\nЖду твоё сообщение! 💌")
 
-@dp.message(F.text == "📩 Входящие")
-async def inbox(message: Message):
+@dp.callback_query(F.data.startswith("msg:reply:"))
+async def begin_message_reply(callback: CallbackQuery, state: FSMContext):
+    message_id = int(callback.data.rsplit(":", 1)[1])
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id,category,body,created_at,postcard FROM nobody_messages WHERE recipient_id=$1 ORDER BY created_at DESC LIMIT 10", message.from_user.id)
-        await conn.execute("UPDATE nobody_messages SET is_read=TRUE WHERE recipient_id=$1", message.from_user.id)
-    if not rows:
-        await message.answer("📭 Пока сообщений нет. Поделись своей ссылкой!"); return
-    for row in rows:
-        await message.answer(f"💌 Анонимное сообщение #{row['id']}\n{CATEGORIES.get(row['category'], CATEGORIES['other'])}\n\n{row['body']}" + ("\n❤️ С открыткой" if row["postcard"] else "") + "\n\nРаскрытие личности — 50 ₽ (следующий этап).")
+        row = await conn.fetchrow(
+            "SELECT recipient_id FROM nobody_messages WHERE id=$1", message_id
+        )
+    if not row or row["recipient_id"] != callback.from_user.id:
+        await callback.answer("Это сообщение недоступно.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(reply_message_id=message_id)
+    await state.set_state(ReplyFlow.text)
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer("Напиши ответ. Он будет отправлен автору анонимно:")
+
+@dp.message(ReplyFlow.text)
+async def send_anonymous_reply(message: Message, state: FSMContext, bot: Bot):
+    body = (message.text or "").strip()
+    if not body or len(body) > 2000:
+        await message.answer("Напиши текст ответа до 2000 символов.")
+        return
+    data = await state.get_data()
+    message_id = data.get("reply_message_id")
+    async with db_pool.acquire() as conn:
+        original = await conn.fetchrow(
+            "SELECT sender_id, recipient_id FROM nobody_messages WHERE id=$1", message_id
+        )
+    if not original or original["recipient_id"] != message.from_user.id:
+        await state.clear()
+        await message.answer("Не удалось найти исходное сообщение. Попробуй ещё раз.")
+        return
+    try:
+        await bot.send_message(
+            original["sender_id"],
+            f"↩️ Тебе ответили на анонимное сообщение №{message_id}:\n\n{body}\n\n"
+            "Ответ отправлен анонимно через VIP NOBODY."
+        )
+    except Exception:
+        log.exception("Could not deliver anonymous reply to sender of message %s", message_id)
+        await message.answer("Не удалось доставить ответ. Возможно, автор ещё не открыл бота или заблокировал его.")
+        await state.clear()
+        return
+    await state.clear()
+    await message.answer("✅ Ответ отправлен автору анонимно.", reply_markup=main_keyboard(await is_admin(message.from_user.id)))
+
+@dp.callback_query(F.data.startswith("msg:reveal:"))
+async def reveal_message_author(callback: CallbackQuery, bot: Bot):
+    if not callback.from_user:
+        await callback.answer("Не удалось определить пользователя.", show_alert=True)
+        return
+    message_id = int(callback.data.rsplit(":", 1)[1])
+    user_id = callback.from_user.id
+    try:
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT * FROM nobody_messages WHERE id=$1 AND recipient_id=$2 FOR UPDATE",
+                    message_id, user_id
+                )
+                if not row:
+                    await callback.answer("Сообщение не найдено.", show_alert=True)
+                    return
+                author = await conn.fetchrow(
+                    "SELECT telegram_id, username, first_name, last_name FROM nobody_users WHERE telegram_id=$1",
+                    row["sender_id"]
+                )
+                if row["revealed"]:
+                    already_revealed = True
+                else:
+                    updated = await conn.fetchrow(
+                        "UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance",
+                        user_id, REVEAL_PRICE
+                    )
+                    if updated is None:
+                        raise ValueError("Недостаточно средств. Пополни баланс и попробуй снова.")
+                    await conn.execute(
+                        """INSERT INTO nobody_transactions (user_id, amount, kind, description, ref)
+                           VALUES ($1,$2,'debit',$3,$4)""",
+                        user_id, -REVEAL_PRICE, f"Раскрытие автора анонимного сообщения №{message_id}",
+                        f"reveal:{message_id}:{user_id}"
+                    )
+                    await conn.execute(
+                        "UPDATE nobody_messages SET revealed=TRUE WHERE id=$1 AND recipient_id=$2",
+                        message_id, user_id
+                    )
+                    already_revealed = False
+        await callback.answer("Личность раскрыта!" if not already_revealed else "Уже раскрыто.")
+        username = f"@{author['username']}" if author and author["username"] else "не указан"
+        full_name = " ".join(part for part in [author["first_name"], author["last_name"]] if part) if author else "неизвестно"
+        result_text = (
+            f"🔎 Автор сообщения №{message_id}\n\n"
+            f"Имя: {full_name}\nUsername: {username}\nTelegram ID: {author['telegram_id'] if author else row['sender_id']}"
+        )
+        if callback.message:
+            await callback.message.answer(result_text)
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+    except Exception:
+        log.exception("Failed to reveal author for message %s", message_id)
+        await callback.answer("Не удалось выполнить операцию. Попробуй ещё раз.", show_alert=True)
 
 @dp.message(F.text == "💰 Баланс")
 async def balance(message: Message):
