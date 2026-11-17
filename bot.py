@@ -514,7 +514,8 @@ async def topup_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(TopUpFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer(
+        await send_flow_message(
+            callback.bot, callback.from_user.id, state,
             "💳 Введи сумму пополнения в рублях:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")]
@@ -530,9 +531,14 @@ async def topup_amount(message: Message, state: FSMContext):
     except (InvalidOperation, ValueError):
         await message.answer("Введи корректную сумму больше 0 ₽.")
         return
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await state.update_data(topup_amount=str(amount))
     await state.set_state(TopUpFlow.sender)
-    await message.answer(
+    await send_flow_message(
+        message.bot, message.chat.id, state,
         "Укажи имя и фамилию отправителя — как будет указано в переводе:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")]
@@ -545,6 +551,10 @@ async def topup_sender(message: Message, state: FSMContext):
     if len(sender_name) < 2 or len(sender_name) > 80:
         await message.answer("Укажи имя отправителя (от 2 до 80 символов).")
         return
+    try:
+        await message.delete()
+    except Exception:
+        pass
     await state.update_data(sender_name=sender_name)
     await state.set_state(TopUpFlow.confirm)
     data = await state.get_data()
@@ -553,7 +563,8 @@ async def topup_sender(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="✅ Я отправил оплату", callback_data="topup:sent")],
         [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")],
     ])
-    await message.answer(
+    await send_flow_message(
+        message.bot, message.chat.id, state,
         f"💳 Пополнение баланса\n\nСумма: {amount:.2f} ₽\nОтправитель: {sender_name}\n\n"
         "Переведи указанную сумму по реквизитам:\n"
         "🏦 Сбербанк\nНомер: +79607178182\n\n"
@@ -562,11 +573,12 @@ async def topup_sender(message: Message, state: FSMContext):
     )
 
 @dp.callback_query(F.data == "topup:cancel")
-async def topup_cancel(callback: CallbackQuery, state: FSMContext):
+async def topup_cancel(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    await clear_flow_message(bot, callback.from_user.id, state)
     await state.clear()
-    await callback.answer("Заявка отменена.")
+    await callback.answer("Пополнение отменено.")
     if callback.message:
-        await callback.message.answer("Пополнение отменено.")
+        await callback.message.answer("❌ Пополнение отменено.")
 
 @dp.callback_query(F.data == "topup:sent")
 async def topup_sent(callback: CallbackQuery, state: FSMContext, bot: Bot):
