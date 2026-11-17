@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from urllib.parse import urlparse
+from decimal import Decimal
 
 import asyncpg
 from aiogram import Bot, Dispatcher, F
@@ -244,9 +244,12 @@ async def my_link(message: Message, bot: Bot) -> None:
         return
     link = f"https://t.me/{username}?start=to_{message.from_user.id}"
     await message.answer(
-        "🔗 Твоя персональная ссылка:\n"
+        "💜 Есть кое-что, что давно хотел сказать?\n"
+        "Признайся, задай вопрос или отправь комплимент — "
+        "можешь остаться загадкой 👀\n\n"
+        "👇 Напиши мне анонимно:\n"
         f"{link}\n\n"
-        "Скопируй её и отправь друзьям или размести в соцсетях."
+        "Жду твоё сообщение! 💌"
     )
 
 
