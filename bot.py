@@ -218,6 +218,18 @@ async def init_database() -> None:
             )
         """)
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_gifts (
+                id BIGSERIAL PRIMARY KEY,
+                sender_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                recipient_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                amount NUMERIC(12,2) NOT NULL CHECK (amount >= 10),
+                body TEXT NOT NULL,
+                anonymous BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                ref TEXT UNIQUE NOT NULL
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_withdrawals (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL CHECK (amount > 0), phone TEXT NOT NULL, bank TEXT NOT NULL,
