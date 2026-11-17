@@ -861,10 +861,19 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
         if callback.message:
             if not already_revealed:
                 await callback.message.answer(
-                    f"💸 Списано с баланса: {reveal_price:.2f} ₽\\n"
+                    f"💸 Списано с баланса: {reveal_price:.2f} ₽\n"
                     f"Остаток на балансе: {balance_after:.2f} ₽"
                 )
-            await callback.message.answer(result_text)
+            try:
+                photos = await bot.get_user_profile_photos(row["sender_id"], limit=1)
+                if photos.total_count and photos.photos:
+                    photo_file_id = photos.photos[0][-1].file_id
+                    await callback.message.answer_photo(photo_file_id, caption=result_text)
+                else:
+                    await callback.message.answer(result_text)
+            except Exception:
+                log.exception("Could not fetch profile photo for revealed author %s", row["sender_id"])
+                await callback.message.answer(result_text)
     except ValueError as exc:
         if "Недостаточно средств" in str(exc):
             await callback.answer()
