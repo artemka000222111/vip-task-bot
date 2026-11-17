@@ -232,7 +232,6 @@ async def receive_text(message: Message, state: FSMContext):
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
-    await state.clear()
     await message.answer("Текст готов! Можно добавить фирменную открытку:", reply_markup=postcard_keyboard())
 
 @dp.callback_query(F.data == "card:preview")
