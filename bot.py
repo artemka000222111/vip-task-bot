@@ -1947,47 +1947,6 @@ async def admin_panel(message: Message, state: FSMContext):
     ])
     await message.answer("🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
-@dp.message(Command("testbonus"))
-async def admin_test_referral_bonus(message: Message, bot: Bot):
-    if not await is_admin(message.from_user.id):
-        return
-    async with db_pool.acquire() as conn:
-        inserted = await conn.fetchval(
-            """INSERT INTO nobody_partner_ledger
-               (partner_id, source_user_id, amount, kind, description, ref)
-               VALUES ($1, NULL, 1.00, 'referral_bonus', 'ТЕСТ: бонус за нового реферала', $2)
-               ON CONFLICT (ref) DO NOTHING RETURNING id""",
-            ADMIN_ID, f"test-referral-bonus:{ADMIN_ID}"
-        )
-    if not inserted:
-        await message.answer("Тестовый бонус уже начислялся. Для повторного теста сначала отправь /undotestbonus.")
-        return
-    await message.answer(
-        "🎉 У вас новый реферал!\n\n"
-        "На ваш партнёрский баланс зачислен 1 ₽.\n\n"
-        "Также вы получаете:\n"
-        "💌 10% с каждой его покупки\n"
-        "💸 5% с его вывода после одобрения заявки.\n\n"
-        "🧪 Это тестовое уведомление. Для отмены тестового начисления отправь /undotestbonus."
-    )
-
-
-@dp.message(Command("undotestbonus"))
-async def admin_undo_test_referral_bonus(message: Message):
-    if not await is_admin(message.from_user.id):
-        return
-    async with db_pool.acquire() as conn:
-        deleted = await conn.fetchval(
-            """DELETE FROM nobody_partner_ledger
-               WHERE partner_id=$1 AND ref=$2 RETURNING id""",
-            ADMIN_ID, f"test-referral-bonus:{ADMIN_ID}"
-        )
-    if deleted:
-        await message.answer("✅ Тестовый 1 ₽ удалён с партнёрского баланса.")
-    else:
-        await message.answer("Тестового начисления нет — удалять нечего.")
-
-
 @dp.message(Command("setref"))
 async def admin_set_referrer(message: Message):
     if not await is_admin(message.from_user.id):
