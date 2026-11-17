@@ -232,6 +232,14 @@ async def init_database() -> None:
             )
         """)
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS nobody_pending_gifts (
+                sender_id BIGINT PRIMARY KEY REFERENCES nobody_users(telegram_id) ON DELETE CASCADE,
+                recipient_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
+                body TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_withdrawals (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL CHECK (amount > 0), phone TEXT NOT NULL, bank TEXT NOT NULL,
@@ -389,9 +397,19 @@ async def receive_text(message: Message, state: FSMContext):
         await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
     card_price = await get_price("card_price")
-    await send_flow_message(message.bot, message.chat.id, state,
-                            "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай открытку и отправляй красиво!",
-                            reply_markup=postcard_keyboard(card_price))
+    if data.get("category") == "gift":
+        gift_only = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 Подарить деньги", callback_data="card:gift")]
+        ])
+        await send_flow_message(
+            message.bot, message.chat.id, state,
+            "🎁 Категория «Подарок»\n\nДля неё доступен денежный подарок. Нажми кнопку ниже, чтобы выбрать сумму.",
+            reply_markup=gift_only
+        )
+    else:
+        await send_flow_message(message.bot, message.chat.id, state,
+                                "💌 Сообщение готово!\n\nУкрась его открыткой — так послание станет ещё выразительнее!\n\n❤️ Сердечко — тёплые чувства\n🌹 Роза — знак симпатии\n💔 Разбитое сердце — немного грусти\n💌 Тайный конверт — для важного сообщения\n🎁 Подарить деньги\n\nВыбирай открытку и отправляй красиво!",
+                                reply_markup=postcard_keyboard(card_price))
 
 @dp.callback_query(F.data == "card:gift")
 async def gift_start(callback: CallbackQuery, state: FSMContext):
@@ -411,6 +429,13 @@ async def gift_amount(message: Message, state: FSMContext):
     except (InvalidOperation, ValueError):
         await message.answer("Сумма подарка должна быть от 10 до 5 000 ₽. Введи корректную сумму."); return
     if await get_balance(message.from_user.id) < amount:
+        data = await state.get_data()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO nobody_pending_gifts (sender_id,recipient_id,body) VALUES ($1,$2,$3) "
+                "ON CONFLICT (sender_id) DO UPDATE SET recipient_id=EXCLUDED.recipient_id, body=EXCLUDED.body, created_at=NOW()",
+                message.from_user.id, data["recipient_id"], data["body"]
+            )
         await state.update_data(resume_gift=True)
         await message.answer(
             "Недостаточно средств для такого подарка. Пополни баланс — после подтверждения оплаты вернём тебя к подарку, и ты сможешь снова указать сумму.",
@@ -437,6 +462,8 @@ async def gift_text(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "gift:cancel")
 async def gift_cancel(callback: CallbackQuery, state: FSMContext):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM nobody_pending_gifts WHERE sender_id=$1", callback.from_user.id)
     await state.clear()
     await callback.answer("Подарок отменён.")
     if callback.message: await callback.message.answer("Подарок отменён. Можешь отправить обычное сообщение.")
@@ -467,6 +494,8 @@ async def gift_send(callback: CallbackQuery, state: FSMContext, bot: Bot):
         if callback.message:
             await callback.message.answer("Недостаточно средств для подарка.", reply_markup=insufficient_balance_keyboard())
         await state.clear(); return
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM nobody_pending_gifts WHERE sender_id=$1", sender_id)
     await state.clear()
     await callback.answer("Подарок отправлен!")
     sender = callback.from_user
@@ -961,19 +990,26 @@ async def topup_approve(callback: CallbackQuery, bot: Bot):
     if callback.message:
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(f"✅ Заявка №{topup_id} подтверждена. Начислено {Decimal(row['amount']):.2f} ₽.")
-    resume_gift = False
-    user_state = None
+    pending_gift = None
     try:
-        user_state = await dp.fsm.get_context(bot=bot, chat_id=row["user_id"], user_id=row["user_id"])
-        saved = await user_state.get_data()
-        resume_gift = bool(saved.get("resume_gift"))
-        if resume_gift:
-            await user_state.update_data(resume_gift=False)
+        async with db_pool.acquire() as conn:
+            pending_gift = await conn.fetchrow(
+                "SELECT recipient_id,body FROM nobody_pending_gifts WHERE sender_id=$1",
+                row["user_id"]
+            )
+        if pending_gift:
+            user_state = await dp.fsm.get_context(bot=bot, chat_id=row["user_id"], user_id=row["user_id"])
+            await user_state.update_data(
+                recipient_id=pending_gift["recipient_id"],
+                body=pending_gift["body"],
+                category="gift",
+                resume_gift=False
+            )
             await user_state.set_state(GiftFlow.amount)
     except Exception:
         log.exception("Could not restore gift flow after top-up %s", topup_id)
     try:
-        if resume_gift:
+        if pending_gift:
             await bot.send_message(
                 row["user_id"],
                 f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.\n\n"
