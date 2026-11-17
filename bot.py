@@ -202,6 +202,19 @@ async def replace_callback_message(callback: CallbackQuery, text: str, reply_mar
 class FlowInputCleanupMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         state = data.get("state")
+        if isinstance(event, Message) and event.chat.type == "private" and (event.text or "").strip() == "⬅️ Главное меню":
+            if state is not None:
+                await state.clear()
+            await event.answer(
+                "👋 Главное меню VIP NOBODY. Выбери нужный раздел:",
+                reply_markup=main_keyboard(await is_admin(event.from_user.id))
+            )
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            return None
+
         active_flow = False
         if state is not None:
             try:
