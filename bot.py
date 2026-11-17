@@ -1137,9 +1137,9 @@ async def stats_people(callback: CallbackQuery):
     await callback.answer()
     if callback.message:
         await callback.message.answer(
-            f"👥 ЛЮДИ\\n\\n"
-            f"Всего людей: {total}\\n"
-            f"Активность за неделю: {week}\\n"
+            f"👥 ЛЮДИ\n\n"
+            f"Всего людей: {total}\n"
+            f"Активность за неделю: {week}\n"
             f"Активность сегодня: {today}"
         )
 
@@ -1166,10 +1166,10 @@ async def stats_earnings(callback: CallbackQuery):
     await callback.answer()
     if callback.message:
         await callback.message.answer(
-            f"💰 ЗАРАБОТОК\\n\\n"
-            f"Общий баланс людей: {Decimal(balance):.2f} ₽\\n"
-            f"Всего потрачено: {Decimal(spent):.2f} ₽\\n\\n"
-            f"Пополнения за сегодня: {Decimal(topups_today):.2f} ₽\\n"
+            f"💰 ЗАРАБОТОК\n\n"
+            f"Общий баланс людей: {Decimal(balance):.2f} ₽\n"
+            f"Всего потрачено: {Decimal(spent):.2f} ₽\n\n"
+            f"Пополнения за сегодня: {Decimal(topups_today):.2f} ₽\n"
             f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
         )
 
