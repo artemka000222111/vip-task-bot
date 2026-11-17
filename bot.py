@@ -31,6 +31,7 @@ CATEGORIES = {
     "compliment": "😍 Комплимент",
     "question": "❓ Вопрос",
     "joke": "😂 Прикол",
+    "gift": "🎁 Подарок",
     "other": "💬 Другое",
 }
 POSTCARDS = {
@@ -95,7 +96,8 @@ def category_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=CATEGORIES["compliment"], callback_data="category:compliment")],
         [InlineKeyboardButton(text=CATEGORIES["question"], callback_data="category:question"),
          InlineKeyboardButton(text=CATEGORIES["joke"], callback_data="category:joke")],
-        [InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
+        [InlineKeyboardButton(text=CATEGORIES["gift"], callback_data="category:gift"),
+         InlineKeyboardButton(text=CATEGORIES["other"], callback_data="category:other")],
     ])
 
 def postcard_keyboard(price: Decimal) -> InlineKeyboardMarkup:
