@@ -1851,11 +1851,14 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.balance_user)
         if callback.message: await callback.message.answer("Отправь Telegram ID пользователя.")
     elif action == "prices":
-        card_price = await get_price("card_price")
-        reveal_price = await get_price("reveal_price")
+        async with db_pool.acquire() as conn:
+            card_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='card_price'")
+            reveal_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='reveal_price'")
+        card_label = f"{Decimal(card_value):.2f} ₽" if card_value is not None else "не задана"
+        reveal_label = f"{Decimal(reveal_value):.2f} ₽" if reveal_value is not None else "не задана"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_price:.2f} ₽", callback_data="price:card")],
-            [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_price:.2f} ₽", callback_data="price:reveal")],
+            [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_label}", callback_data="price:card")],
+            [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_label}", callback_data="price:reveal")],
 
         ])
         if callback.message:
