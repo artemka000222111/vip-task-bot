@@ -441,7 +441,7 @@ async def gift_resume(callback: CallbackQuery, state: FSMContext):
     await state.set_state(GiftFlow.amount)
     await callback.answer()
     if callback.message:
-        await callback.message.answer("🎁 Возвращаемся к подарку!\\nУкажи сумму от 10 до 5 000 ₽:")
+        await callback.message.answer("🎁 Возвращаемся к подарку!\nУкажи сумму от 10 до 5 000 ₽:")
 
 @dp.message(GiftFlow.amount)
 async def gift_amount(message: Message, state: FSMContext):
@@ -1037,7 +1037,7 @@ async def topup_approve(callback: CallbackQuery, bot: Bot):
             ])
             await bot.send_message(
                 row["user_id"],
-                f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.\\n\\n"
+                f"✅ Оплата подтверждена! На баланс зачислено {Decimal(row['amount']):.2f} ₽.\n\n"
                 "Твой подарок сохранён. Нажми кнопку ниже, чтобы продолжить и указать сумму:",
                 reply_markup=resume_kb
             )
