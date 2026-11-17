@@ -1271,9 +1271,7 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
         project_percent = Decimal("5") if referrer_id else Decimal("10")
         partner_percent = Decimal("5") if referrer_id else Decimal("0")
         await replace_callback_message(callback, 
-            f"💸 Вывод средств\n\nКомиссия проекта: {project_percent:.0f}%"
-            + (f"\nКомиссия рефереру: {partner_percent:.0f}%" if partner_percent else "")
-            + "\nКомиссия: 10% без реферала или 5% проекту + 5% рефереру, если пользователь приглашён.\n\n"
+            "💸 Вывод средств\n\nКомиссия за вывод — 10%.\n\n"
             f"Введи сумму от {await get_price('min_withdraw_amount'):.2f} ₽:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
@@ -1320,10 +1318,10 @@ async def withdraw_amount(message: Message, state: FSMContext):
         withdraw_partner_fee=str(partner_fee), withdraw_payout=str(payout)
     )
     await state.set_state(WithdrawFlow.phone)
+    total_fee = project_fee + partner_fee
     await send_flow_message(message.bot, message.chat.id, state, 
         f"Сумма вывода: {amount:.2f} ₽\n"
-        f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
-        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
+        f"Комиссия 10%: {total_fee:.2f} ₽\n"
         + f"На карту поступит: {payout:.2f} ₽\n\n"
         "Теперь укажи номер телефона для получения перевода:"
     )
@@ -1367,18 +1365,19 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     project_fee = (amount * project_percent / Decimal("100")).quantize(Decimal("0.01"))
     partner_fee = Decimal(data["withdraw_partner_fee"])
     payout = Decimal(data["withdraw_payout"])
+    total_fee = project_fee + partner_fee
     await send_flow_message(message.bot, message.chat.id, state, 
         f"✅ Заявка на вывод №{wid} отправлена.\n\n"
-        f"Сумма списания: {amount:.2f} ₽\nКомиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
-        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
+        f"Сумма вывода: {amount:.2f} ₽\nКомиссия 10%: {total_fee:.2f} ₽\n"
         + f"К получению: {payout:.2f} ₽\n\nСредства списаны до проверки."
     )
     user = message.from_user
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Выплачено", callback_data=f"withdraw:approve:{wid}"), InlineKeyboardButton(text="❌ Отклонить и вернуть", callback_data=f"withdraw:reject:{wid}")]])
-    await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\nСписать с баланса: {amount:.2f} ₽\n"
-        f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
-        + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
-        + f"К выплате: {payout:.2f} ₽\n"
+    await bot.send_message(ADMIN_ID, f"💸 ЗАЯВКА НА ВЫВОД №{wid}\n\n"
+        f"Сумма списания с баланса: {amount:.2f} ₽\n"
+        + (f"Комиссия рефереру (5%): {partner_fee:.2f} ₽\n" if partner_percent else "Комиссия рефереру: 0.00 ₽ (нет реферера)\n")
+        + f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
+        f"ИТОГО ПЕРЕВЕСТИ ПОЛЬЗОВАТЕЛЮ: {payout:.2f} ₽\n"
         f"Телефон: {data['withdraw_phone']}\nБанк: {bank}\nПользователь: {user.full_name}\n"
         f"Username: @{user.username if user.username else 'не указан'}\nTelegram ID: {uid}", reply_markup=kb)
 
