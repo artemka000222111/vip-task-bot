@@ -333,28 +333,30 @@ async def card_preview(callback: CallbackQuery, state: FSMContext, bot: Bot):
         await callback.answer("Начните отправку заново по ссылке.", show_alert=True); return
     async with db_pool.acquire() as conn:
         file_id = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='heart_file_id'")
+    card_price = await get_price("card_price")
     await callback.answer()
     if callback.message:
         await clear_flow_message(bot, callback.from_user.id, state)
     if file_id and callback.message:
         sent = await bot.send_photo(callback.from_user.id, file_id,
-            caption="❤️ Красное сердечко — 10 ₽\n\nТак будет выглядеть открытка у получателя.",
-            reply_markup=preview_keyboard())
+            caption=f"❤️ Красное сердечко — {card_price:.2f} ₽\n\nТак будет выглядеть открытка у получателя.",
+            reply_markup=preview_keyboard(card_price))
         await state.update_data(flow_bot_message_id=sent.message_id)
     elif callback.message:
         await send_flow_message(bot, callback.from_user.id, state,
             "❤️ ПРЕДПРОСМОТР ОТКРЫТКИ\n\n"
             "Красное сердечко на тёмном фоне.\n"
             "Логотип VIP NOBODY будет маленьким и аккуратным в углу.\n\n"
-            "Стоимость: 10 ₽",
-            reply_markup=preview_keyboard())
+            f"Стоимость: {card_price:.2f} ₽",
+            reply_markup=preview_keyboard(card_price))
 
 @dp.callback_query(F.data == "card:back")
 async def card_back(callback: CallbackQuery, state: FSMContext, bot: Bot):
     await callback.answer()
     if callback.message:
+        card_price = await get_price("card_price")
         await send_flow_message(bot, callback.from_user.id, state,
-                                "Выберите действие:", reply_markup=postcard_keyboard())
+                                "Выберите действие:", reply_markup=postcard_keyboard(card_price))
 
 async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot, paid_card: bool):
     data = await state.get_data()
@@ -369,16 +371,17 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 if paid_card:
+                    card_price = await get_price("card_price")
                     user = await conn.fetchrow("""
                         UPDATE nobody_users SET balance=balance-$2
                         WHERE telegram_id=$1 AND balance >= $2 RETURNING balance
-                    """, sender_id, CARD_PRICE)
+                    """, sender_id, card_price)
                     if user is None:
                         raise ValueError("Недостаточно средств. Пополните баланс.")
                     await conn.execute("""
                         INSERT INTO nobody_transactions (user_id,amount,kind,description,ref)
                         VALUES ($1,$2,'debit','Покупка открытки-сердечка',$3)
-                    """, sender_id, -CARD_PRICE, f"card:{sender_id}:{callback.id}")
+                    """, sender_id, -card_price, f"card:{sender_id}:{callback.id}")
                 row = await conn.fetchrow("""
                     INSERT INTO nobody_messages (recipient_id,sender_id,category,body,postcard)
                     VALUES ($1,$2,$3,$4,$5) RETURNING id
@@ -387,7 +390,7 @@ async def finish_anonymous(callback: CallbackQuery, state: FSMContext, bot: Bot,
         await callback.answer("Сообщение отправлено!")
         if callback.message:
             await callback.message.answer(
-                "✅ Анонимное сообщение отправлено!" + (" Открытка куплена за 10 ₽." if paid_card else ""),
+                "✅ Анонимное сообщение отправлено!" + (f" Открытка куплена за {card_price:.2f} ₽." if paid_card else ""),
                 reply_markup=main_keyboard(await is_admin(sender_id)))
         await send_message_to_recipient(bot, recipient_id, category, body, row["id"], paid_card)
     except ValueError as e:
@@ -481,16 +484,17 @@ async def reveal_message_author(callback: CallbackQuery, bot: Bot):
                 if row["revealed"]:
                     already_revealed = True
                 else:
+                    reveal_price = await get_price("reveal_price")
                     updated = await conn.fetchrow(
                         "UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance",
-                        user_id, REVEAL_PRICE
+                        user_id, reveal_price
                     )
                     if updated is None:
                         raise ValueError("Недостаточно средств. Пополни баланс и попробуй снова.")
                     await conn.execute(
                         """INSERT INTO nobody_transactions (user_id, amount, kind, description, ref)
                            VALUES ($1,$2,'debit',$3,$4)""",
-                        user_id, -REVEAL_PRICE, f"Раскрытие автора анонимного сообщения №{message_id}",
+                        user_id, -reveal_price, f"Раскрытие автора анонимного сообщения №{message_id}",
                         f"reveal:{message_id}:{user_id}"
                     )
                     await conn.execute(
@@ -562,7 +566,17 @@ async def topup_amount(message: Message, state: FSMContext):
 async def topup_sender(message: Message, state: FSMContext):
     sender_name = (message.text or "").strip()
     if len(sender_name) < 2 or len(sender_name) > 80:
-        await message.answer("Укажи имя отправителя (от 2 до 80 символов).")
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await send_flow_message(
+            message.bot, message.chat.id, state,
+            "Укажи имя отправителя (от 2 до 80 символов).",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отменить пополнение", callback_data="topup:cancel")]
+            ])
+        )
         return
     try:
         await message.delete()
