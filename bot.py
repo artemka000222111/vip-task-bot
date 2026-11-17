@@ -600,10 +600,10 @@ async def choose_category(callback: CallbackQuery, state: FSMContext):
 async def receive_text(message: Message, state: FSMContext):
     body = (message.text or "").strip()
     if not body or len(body) > 2000:
-        await message.answer("Отправьте текст до 2000 символов."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Отправьте текст до 2000 символов."); return
     data = await state.get_data()
     if not message.from_user or not data.get("recipient_id") or data.get("category") not in CATEGORIES:
-        await state.clear(); await message.answer("Начните заново по персональной ссылке."); return
+        await state.clear(); await send_flow_message(message.bot, message.chat.id, state, "Начните заново по персональной ссылке."); return
     await state.update_data(body=body)
     await state.set_state(AnonymousFlow.confirm)
     await send_flow_message(message.bot, message.chat.id, state,
@@ -633,7 +633,7 @@ async def gift_amount(message: Message, state: FSMContext):
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
         if amount < Decimal("10") or amount > Decimal("5000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Сумма подарка должна быть от 10 до 5 000 ₽. Введи корректную сумму."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Сумма подарка должна быть от 10 до 5 000 ₽. Введи корректную сумму."); return
     if await get_balance(message.from_user.id) < amount:
         data = await state.get_data()
         async with db_pool.acquire() as conn:
@@ -643,7 +643,7 @@ async def gift_amount(message: Message, state: FSMContext):
                 message.from_user.id, data["recipient_id"], data["gift_body"], data.get("anonymous", True)
             )
         await state.update_data(resume_gift=True)
-        await message.answer(
+        await send_flow_message(message.bot, message.chat.id, state, 
             "Недостаточно средств для такого подарка. Пополни баланс — после подтверждения оплаты вернём тебя к подарку, и ты сможешь снова указать сумму.",
             reply_markup=insufficient_balance_keyboard()
         )
@@ -654,7 +654,7 @@ async def gift_amount(message: Message, state: FSMContext):
     recipient_id = int(data["recipient_id"])
     anonymous = bool(data.get("anonymous", True))
     if sender_id == recipient_id:
-        await message.answer("Нельзя отправить подарок самому себе.")
+        await send_flow_message(message.bot, message.chat.id, state, "Нельзя отправить подарок самому себе.")
         await state.clear()
         return
     gift_ref = f"gift:{sender_id}:{message.message_id}"
@@ -669,7 +669,7 @@ async def gift_amount(message: Message, state: FSMContext):
                 await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'debit','Денежный подарок',$3)", sender_id, -amount, f"gift-send:{gift_ref}")
                 await conn.execute("INSERT INTO nobody_transactions (user_id,amount,kind,description,ref) VALUES ($1,$2,'credit','Получен денежный подарок',$3)", recipient_id, amount, f"gift-receive:{gift_ref}")
     except ValueError:
-        await message.answer("Недостаточно средств для подарка.", reply_markup=insufficient_balance_keyboard())
+        await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств для подарка.", reply_markup=insufficient_balance_keyboard())
         return
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM nobody_pending_gifts WHERE sender_id=$1", sender_id)
@@ -685,16 +685,16 @@ async def gift_amount(message: Message, state: FSMContext):
             await message.bot.send_message(recipient_id, caption)
     except Exception:
         log.exception("Could not deliver gift %s to recipient %s", gift_id, recipient_id)
-    await message.answer(f"✅ Денежный подарок на {amount:.2f} ₽ отправлен!\nТекущий баланс: {await get_balance(sender_id):.2f} ₽")
+    await send_flow_message(message.bot, message.chat.id, state, f"✅ Денежный подарок на {amount:.2f} ₽ отправлен!\nТекущий баланс: {await get_balance(sender_id):.2f} ₽")
 
 @dp.message(GiftFlow.text)
 async def gift_text(message: Message, state: FSMContext):
     body = (message.text or "").strip()
     if not body or len(body) > 1000:
-        await message.answer("Напиши текст от 1 до 1000 символов."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Напиши текст от 1 до 1000 символов."); return
     await state.update_data(gift_body=body)
     await state.set_state(GiftFlow.amount)
-    await message.answer("Укажи сумму подарка от 10 до 5 000 ₽:")
+    await send_flow_message(message.bot, message.chat.id, state, "Укажи сумму подарка от 10 до 5 000 ₽:")
 
 @dp.callback_query(F.data == "gift:cancel")
 async def gift_cancel(callback: CallbackQuery, state: FSMContext):
@@ -921,7 +921,7 @@ async def begin_message_reply(callback: CallbackQuery, state: FSMContext):
 async def send_anonymous_reply(message: Message, state: FSMContext, bot: Bot):
     body = (message.text or "").strip()
     if not body or len(body) > 2000:
-        await message.answer("Напиши текст ответа до 2000 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Напиши текст ответа до 2000 символов.")
         return
     data = await state.get_data()
     message_id = data.get("reply_message_id")
@@ -931,7 +931,7 @@ async def send_anonymous_reply(message: Message, state: FSMContext, bot: Bot):
         )
     if not original or original["recipient_id"] != message.from_user.id:
         await state.clear()
-        await message.answer("Не удалось найти исходное сообщение. Попробуй ещё раз.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не удалось найти исходное сообщение. Попробуй ещё раз.")
         return
     try:
         await bot.send_message(
@@ -941,11 +941,11 @@ async def send_anonymous_reply(message: Message, state: FSMContext, bot: Bot):
         )
     except Exception:
         log.exception("Could not deliver anonymous reply to sender of message %s", message_id)
-        await message.answer("Не удалось доставить ответ. Возможно, автор ещё не открыл бота или заблокировал его.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не удалось доставить ответ. Возможно, автор ещё не открыл бота или заблокировал его.")
         await state.clear()
         return
     await state.clear()
-    await message.answer("✅ Ответ отправлен автору анонимно.", reply_markup=main_keyboard(await is_admin(message.from_user.id)))
+    await send_flow_message(message.bot, message.chat.id, state, "✅ Ответ отправлен автору анонимно.", reply_markup=main_keyboard(await is_admin(message.from_user.id)))
 
 @dp.callback_query(F.data.startswith("msg:reveal:"))
 async def reveal_message_author(callback: CallbackQuery, bot: Bot):
@@ -1189,11 +1189,11 @@ async def partner_withdraw_amount(message: Message, state: FSMContext):
             raise InvalidOperation
     except (InvalidOperation, ValueError):
         available = await get_partner_balance(message.from_user.id)
-        await message.answer(f"Введи сумму от 100 ₽, не больше доступных {available:.2f} ₽.")
+        await send_flow_message(message.bot, message.chat.id, state, f"Введи сумму от 100 ₽, не больше доступных {available:.2f} ₽.")
         return
     await state.update_data(partner_amount=str(amount))
     await state.set_state(PartnerWithdrawFlow.phone)
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         "📱 Введи номер телефона, который привязан к СБП.\n"
         "На этот номер будет отправлен перевод:"
     )
@@ -1204,11 +1204,11 @@ async def partner_withdraw_phone(message: Message, state: FSMContext):
     phone = (message.text or "").strip()
     digits = "".join(ch for ch in phone if ch.isdigit())
     if len(digits) < 10 or len(digits) > 15:
-        await message.answer("Проверь номер телефона и введи ещё раз.")
+        await send_flow_message(message.bot, message.chat.id, state, "Проверь номер телефона и введи ещё раз.")
         return
     await state.update_data(partner_phone=phone)
     await state.set_state(PartnerWithdrawFlow.bank)
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         "🏦 Укажи название банка, в котором подключён СБП:"
     )
 
@@ -1217,7 +1217,7 @@ async def partner_withdraw_phone(message: Message, state: FSMContext):
 async def partner_withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     bank = (message.text or "").strip()
     if len(bank) < 2 or len(bank) > 80:
-        await message.answer("Введи название банка.")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи название банка.")
         return
     data = await state.get_data()
     uid = message.from_user.id
@@ -1230,7 +1230,7 @@ async def partner_withdraw_bank(message: Message, state: FSMContext, bot: Bot):
             )
             if Decimal(available or 0) < amount:
                 await state.clear()
-                await message.answer("Недостаточно средств для вывода.")
+                await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств для вывода.")
                 return
             wid = await conn.fetchval(
                 "INSERT INTO nobody_partner_withdrawals (user_id,amount,phone,bank) VALUES ($1,$2,$3,$4) RETURNING id",
@@ -1242,7 +1242,7 @@ async def partner_withdraw_bank(message: Message, state: FSMContext, bot: Bot):
                 uid, -amount, f"Резерв партнёрского вывода №{wid}", f"partner-withdraw:{wid}:reserve"
             )
     await state.clear()
-    await message.answer(f"✅ Заявка №{wid} на вывод партнёрского заработка отправлена. Сумма: {amount:.2f} ₽.")
+    await send_flow_message(message.bot, message.chat.id, state, f"✅ Заявка №{wid} на вывод партнёрского заработка отправлена. Сумма: {amount:.2f} ₽.")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Выплачено", callback_data=f"partner:approve:{wid}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"partner:reject:{wid}")
@@ -1354,7 +1354,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
         if amount < minimum or amount > Decimal("1000000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
         minimum = await get_price("min_withdraw_amount")
-        await message.answer(
+        await send_flow_message(message.bot, message.chat.id, state, 
             f"Введи сумму от {minimum:.2f} ₽.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
@@ -1362,7 +1362,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
         ); return
     if await get_balance(message.from_user.id) < amount:
         await state.clear()
-        await message.answer("Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
+        await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств.", reply_markup=insufficient_balance_keyboard()); return
     async with db_pool.acquire() as conn:
         referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", message.from_user.id)
     project_percent = Decimal("5") if referrer_id else Decimal("10")
@@ -1376,7 +1376,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
         withdraw_partner_fee=str(partner_fee), withdraw_payout=str(payout)
     )
     await state.set_state(WithdrawFlow.phone)
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         f"Сумма вывода: {amount:.2f} ₽\n"
         f"Комиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
         + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
@@ -1389,16 +1389,16 @@ async def withdraw_phone(message: Message, state: FSMContext):
     phone = (message.text or "").strip()
     digits = "".join(ch for ch in phone if ch.isdigit())
     if len(digits) < 10 or len(digits) > 15:
-        await message.answer("Проверь номер телефона и введи ещё раз."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Проверь номер телефона и введи ещё раз."); return
     await state.update_data(withdraw_phone=phone)
     await state.set_state(WithdrawFlow.bank)
-    await message.answer("Укажи название банка:")
+    await send_flow_message(message.bot, message.chat.id, state, "Укажи название банка:")
 
 @dp.message(WithdrawFlow.bank)
 async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     bank = (message.text or "").strip()
     if len(bank) < 2 or len(bank) > 80:
-        await message.answer("Введи название банка."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Введи название банка."); return
     data = await state.get_data()
     amount = Decimal(data["withdraw_amount"])
     uid = message.from_user.id
@@ -1407,7 +1407,7 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
             updated = await conn.fetchval("UPDATE nobody_users SET balance=balance-$2 WHERE telegram_id=$1 AND balance >= $2 RETURNING balance", uid, amount)
             if updated is None:
                 await state.clear()
-                await message.answer("Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
+                await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств. Заявка не создана.", reply_markup=insufficient_balance_keyboard()); return
             wid = await conn.fetchval(
                 """INSERT INTO nobody_withdrawals
                    (user_id,amount,phone,bank,commission_percent,payout_amount,referrer_id,referrer_percent,referrer_commission)
@@ -1423,7 +1423,7 @@ async def withdraw_bank(message: Message, state: FSMContext, bot: Bot):
     project_fee = (amount * project_percent / Decimal("100")).quantize(Decimal("0.01"))
     partner_fee = Decimal(data["withdraw_partner_fee"])
     payout = Decimal(data["withdraw_payout"])
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         f"✅ Заявка на вывод №{wid} отправлена.\n\n"
         f"Сумма списания: {amount:.2f} ₽\nКомиссия проекта ({project_percent:.0f}%): {project_fee:.2f} ₽\n"
         + (f"Комиссия рефереру ({partner_percent:.0f}%): {partner_fee:.2f} ₽\n" if partner_percent else "")
@@ -1517,7 +1517,7 @@ async def topup_amount(message: Message, state: FSMContext):
             raise InvalidOperation
     except (InvalidOperation, ValueError):
         minimum = await get_price("min_topup_amount")
-        await message.answer(f"Минимальная сумма пополнения — {minimum:.2f} ₽. Введи корректную сумму.")
+        await send_flow_message(message.bot, message.chat.id, state, f"Минимальная сумма пополнения — {minimum:.2f} ₽. Введи корректную сумму.")
         return
     try:
         await message.delete()
@@ -1813,7 +1813,7 @@ async def notify_admin_support(bot: Bot, ticket_id: int, user_id: int, body: str
 async def support_new_text(message: Message, state: FSMContext, bot: Bot):
     body = (message.text or "").strip()
     if not body or len(body) > 3000:
-        await message.answer("Опиши проблему текстом до 3000 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Опиши проблему текстом до 3000 символов.")
         return
     ticket_id = (await state.get_data()).get("support_ticket_id")
     async with db_pool.acquire() as conn:
@@ -1823,7 +1823,7 @@ async def support_new_text(message: Message, state: FSMContext, bot: Bot):
         )
         await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
     await state.set_state(SupportFlow.user_reply)
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         "✅ Обращение отправлено администрации. Ожидай ответа поддержки."
     )
     try:
@@ -1851,7 +1851,7 @@ async def support_user_reply_start(callback: CallbackQuery, state: FSMContext):
 async def support_user_reply(message: Message, state: FSMContext, bot: Bot):
     body = (message.text or "").strip()
     if not body or len(body) > 3000:
-        await message.answer("Напиши текст до 3000 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Напиши текст до 3000 символов.")
         return
     ticket_id = (await state.get_data()).get("support_ticket_id")
     async with db_pool.acquire() as conn:
@@ -1860,14 +1860,14 @@ async def support_user_reply(message: Message, state: FSMContext, bot: Bot):
             blocked = await conn.fetchval("SELECT 1 FROM nobody_support_blocks WHERE user_id=$1", message.from_user.id)
             if not ticket or ticket["user_id"] != message.from_user.id or ticket["status"] != "open" or blocked:
                 await state.clear()
-                await message.answer("Диалог закрыт или обращения в поддержку недоступны.")
+                await send_flow_message(message.bot, message.chat.id, state, "Диалог закрыт или обращения в поддержку недоступны.")
                 return
             await conn.execute(
                 "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'user',$3)",
                 ticket_id, message.from_user.id, body
             )
             await conn.execute("UPDATE nobody_support_tickets SET updated_at=NOW() WHERE id=$1", ticket_id)
-    await message.answer("✅ Сообщение отправлено администрации. Ожидай ответа поддержки.")
+    await send_flow_message(message.bot, message.chat.id, state, "✅ Сообщение отправлено администрации. Ожидай ответа поддержки.")
     try:
         await notify_admin_support(bot, ticket_id, message.from_user.id, body)
     except Exception:
@@ -1898,7 +1898,7 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
         return
     body = (message.text or "").strip()
     if not body or len(body) > 3000:
-        await message.answer("Введи текст ответа до 3000 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи текст ответа до 3000 символов.")
         return
     ticket_id = (await state.get_data()).get("support_ticket_id")
     async with db_pool.acquire() as conn:
@@ -1906,7 +1906,7 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
             ticket = await conn.fetchrow("SELECT user_id,status,user_can_close FROM nobody_support_tickets WHERE id=$1 FOR UPDATE", ticket_id)
             if not ticket or ticket["status"] != "open":
                 await state.clear()
-                await message.answer("Диалог уже закрыт.")
+                await send_flow_message(message.bot, message.chat.id, state, "Диалог уже закрыт.")
                 return
             await conn.execute(
                 "INSERT INTO nobody_support_messages (ticket_id,sender_id,sender_role,body) VALUES ($1,$2,'admin',$3)",
@@ -1918,10 +1918,10 @@ async def support_admin_reply(message: Message, state: FSMContext, bot: Bot):
             ticket["user_id"], f"💬 Ответ поддержки:\n\n{body}{SUPPORT_SIGNATURE}",
             reply_markup=(support_user_keyboard(ticket_id) if ticket["user_can_close"] else support_user_reply_keyboard(ticket_id))
         )
-        await message.answer("✅ Ответ отправлен.")
+        await send_flow_message(message.bot, message.chat.id, state, "✅ Ответ отправлен.")
     except Exception:
         log.exception("Could not deliver support response for ticket %s", ticket_id)
-        await message.answer("Не удалось доставить ответ пользователю.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не удалось доставить ответ пользователю.")
     await state.clear()
 
 @dp.callback_query(F.data.startswith("support:user_close:"))
@@ -1989,11 +1989,11 @@ async def support_direct_target(message: Message, state: FSMContext):
         return
     user = await resolve_support_user(message.text or "")
     if not user:
-        await message.answer("Не нашёл пользователя. Проверь ID или @username — пользователь должен запускать бота.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не нашёл пользователя. Проверь ID или @username — пользователь должен запускать бота.")
         return
     await state.update_data(direct_user_id=user["telegram_id"])
     await state.set_state(SupportFlow.direct_text)
-    await message.answer(f"Получатель найден: {user['first_name']} (ID {user['telegram_id']}). Теперь введи сообщение.")
+    await send_flow_message(message.bot, message.chat.id, state, f"Получатель найден: {user['first_name']} (ID {user['telegram_id']}). Теперь введи сообщение.")
 
 @dp.message(SupportFlow.direct_text)
 async def support_direct_text(message: Message, state: FSMContext, bot: Bot):
@@ -2002,7 +2002,7 @@ async def support_direct_text(message: Message, state: FSMContext, bot: Bot):
         return
     body = (message.text or "").strip()
     if not body or len(body) > 3000:
-        await message.answer("Введи текст до 3000 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи текст до 3000 символов.")
         return
     user_id = (await state.get_data()).get("direct_user_id")
     try:
@@ -2021,10 +2021,10 @@ async def support_direct_text(message: Message, state: FSMContext, bot: Bot):
             f"💌 Личное сообщение администрации:\n\n{body}{SUPPORT_SIGNATURE}",
             reply_markup=support_user_reply_keyboard(ticket_id)
         )
-        await message.answer("✅ Сообщение отправлено. Пользователь сможет ответить, а завершить диалог сможешь только ты.")
+        await send_flow_message(message.bot, message.chat.id, state, "✅ Сообщение отправлено. Пользователь сможет ответить, а завершить диалог сможешь только ты.")
     except Exception:
         log.exception("Could not send direct support message to %s", user_id)
-        await message.answer("Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не удалось отправить сообщение. Возможно, пользователь заблокировал бота.")
     await state.clear()
 
 @dp.callback_query(F.data == "support:block")
@@ -2050,7 +2050,7 @@ async def support_block_target(message: Message, state: FSMContext):
     lookup = value[8:].strip() if removing else value
     target = await resolve_support_user(lookup)
     if not target:
-        await message.answer("Пользователь не найден. Проверь ID или @username.")
+        await send_flow_message(message.bot, message.chat.id, state, "Пользователь не найден. Проверь ID или @username.")
         return
     async with db_pool.acquire() as conn:
         if removing:
@@ -2062,9 +2062,9 @@ async def support_block_target(message: Message, state: FSMContext):
             )
     await state.clear()
     if removing:
-        await message.answer(f"✅ Запрет обращений снят для ID {target['telegram_id']}.")
+        await send_flow_message(message.bot, message.chat.id, state, f"✅ Запрет обращений снят для ID {target['telegram_id']}.")
     else:
-        await message.answer(f"🚫 Обращения в поддержку заблокированы для ID {target['telegram_id']}.")
+        await send_flow_message(message.bot, message.chat.id, state, f"🚫 Обращения в поддержку заблокированы для ID {target['telegram_id']}.")
 
 @dp.message(Command("admin"))
 @dp.message(F.text == "🛠 Админ-панель")
@@ -2250,7 +2250,7 @@ async def admin_referrals_amount_save(message: Message, state: FSMContext):
             raise InvalidOperation
         amount = amount.quantize(Decimal("0.01"))
     except (InvalidOperation, ValueError):
-        await message.answer("Введи сумму больше 0 и не больше 100 000 ₽. Например: 2 или 2.50")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи сумму больше 0 и не больше 100 000 ₽. Например: 2 или 2.50")
         return
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -2275,7 +2275,7 @@ async def admin_referrals_amount_save(message: Message, state: FSMContext):
         [InlineKeyboardButton(text=toggle_label, callback_data="referrals:toggle")],
         [InlineKeyboardButton(text="💰 Изменить сумму бонуса", callback_data="referrals:amount")]
     ])
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         "✅ Сумма бонуса обновлена!\n\n"
         f"Статус бонуса {amount:g} ₽: {status}\n"
         f"💰 Сумма за нового реферала: {amount:g} ₽\n\n"
@@ -2344,10 +2344,10 @@ async def admin_broadcast_text(message: Message, state: FSMContext):
         return
     body = (message.text or "").strip()
     if not body:
-        await message.answer("Отправь текстовое сообщение для рассылки.")
+        await send_flow_message(message.bot, message.chat.id, state, "Отправь текстовое сообщение для рассылки.")
         return
     if len(body) > 4096:
-        await message.answer("Сообщение слишком длинное. Максимум — 4096 символов.")
+        await send_flow_message(message.bot, message.chat.id, state, "Сообщение слишком длинное. Максимум — 4096 символов.")
         return
     await state.update_data(broadcast_body=body)
     await state.set_state(AdminFlow.broadcast_confirm)
@@ -2355,7 +2355,7 @@ async def admin_broadcast_text(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🚀 Отправить всем", callback_data="broadcast:send")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
     ])
-    await message.answer(
+    await send_flow_message(message.bot, message.chat.id, state, 
         "👀 ПРЕДПРОСМОТР РАССЫЛКИ\n\n"
         + body
         + "\n\nОтправить это сообщение всем пользователям?",
@@ -2426,7 +2426,7 @@ async def admin_view_user_messages(message: Message, state: FSMContext):
         return
     username = (message.text or "").strip().lstrip("@").lower()
     if not username or len(username) > 64 or any(ch.isspace() for ch in username):
-        await message.answer("Введи корректный @username пользователя.")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи корректный @username пользователя.")
         return
     async with db_pool.acquire() as conn:
         user = await conn.fetchrow(
@@ -2444,11 +2444,11 @@ async def admin_view_user_messages(message: Message, state: FSMContext):
                 user["telegram_id"]
             )
     if not user:
-        await message.answer("Пользователь с таким username не найден. Проверь написание.")
+        await send_flow_message(message.bot, message.chat.id, state, "Пользователь с таким username не найден. Проверь написание.")
         return
     await state.clear()
     if not rows:
-        await message.answer(f"У @{user['username']} пока нет полученных анонимных сообщений.")
+        await send_flow_message(message.bot, message.chat.id, state, f"У @{user['username']} пока нет полученных анонимных сообщений.")
         return
     lines = [f"👁 ПОСЛЕДНИЕ 10 СООБЩЕНИЙ ДЛЯ @{user['username']}\n"]
     for index, row in enumerate(rows, 1):
@@ -2458,7 +2458,7 @@ async def admin_view_user_messages(message: Message, state: FSMContext):
         if len(body) > 300:
             body = body[:300].rstrip() + "…"
         lines.append(f"{index}. {category} · {created}\n{body}")
-    await message.answer("\n\n".join(lines))
+    await send_flow_message(message.bot, message.chat.id, state, "\n\n".join(lines))
 
 
 
@@ -2568,13 +2568,13 @@ async def admin_price_save(message: Message, state: FSMContext):
         if value < 0 or (minimum_key and value <= 0) or value > limit:
             raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи корректную цену от 0 до 1 000 000 ₽.")
+        await send_flow_message(message.bot, message.chat.id, state, "Введи корректную цену от 0 до 1 000 000 ₽.")
         return
     data = await state.get_data()
     key = data.get("price_kind")
     if key not in ("card_price", "reveal_price", "min_topup_amount", "min_withdraw_amount"):
         await state.clear()
-        await message.answer("Не удалось определить тип цены. Открой настройки заново.")
+        await send_flow_message(message.bot, message.chat.id, state, "Не удалось определить тип цены. Открой настройки заново.")
         return
     async with db_pool.acquire() as conn:
         await conn.execute(
@@ -2588,21 +2588,21 @@ async def admin_price_save(message: Message, state: FSMContext):
         "min_topup_amount": "минимальное пополнение",
         "min_withdraw_amount": "минимальный вывод",
     }[key]
-    await message.answer(f"✅ Новое значение ({label}): {value:.2f} ₽")
+    await send_flow_message(message.bot, message.chat.id, state, f"✅ Новое значение ({label}): {value:.2f} ₽")
 
 @dp.message(AdminFlow.balance_user)
 async def admin_balance_user(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id): return
     try: target = int((message.text or "").strip())
     except ValueError:
-        await message.answer("Нужен числовой Telegram ID."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Нужен числовой Telegram ID."); return
     async with db_pool.acquire() as conn:
         exists = await conn.fetchval("SELECT 1 FROM nobody_users WHERE telegram_id=$1", target)
     if not exists:
-        await message.answer("Пользователь ещё не запускал бота. Сначала он должен нажать /start."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Пользователь ещё не запускал бота. Сначала он должен нажать /start."); return
     await state.update_data(target_id=target)
     await state.set_state(AdminFlow.balance_amount)
-    await message.answer("Введи сумму в рублях. Для списания напиши положительное число — действие будет выбрано по предыдущему шагу.")
+    await send_flow_message(message.bot, message.chat.id, state, "Введи сумму в рублях. Для списания напиши положительное число — действие будет выбрано по предыдущему шагу.")
 
 @dp.message(AdminFlow.balance_amount)
 async def admin_balance_amount(message: Message, state: FSMContext):
@@ -2611,7 +2611,7 @@ async def admin_balance_amount(message: Message, state: FSMContext):
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
         if amount <= 0 or amount > Decimal("1000000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи корректную сумму больше 0."); return
+        await send_flow_message(message.bot, message.chat.id, state, "Введи корректную сумму больше 0."); return
     data = await state.get_data()
     target = data["target_id"]
     action = data["balance_action"]
@@ -2620,9 +2620,9 @@ async def admin_balance_amount(message: Message, state: FSMContext):
     try:
         await change_balance(target, delta, "Ручное начисление администратором" if delta > 0 else "Ручное списание администратором", ref)
     except ValueError:
-        await message.answer("У пользователя недостаточно средств."); return
+        await send_flow_message(message.bot, message.chat.id, state, "У пользователя недостаточно средств."); return
     await state.clear()
-    await message.answer(f"✅ Операция выполнена. Новый баланс: {await get_balance(target):.2f} ₽")
+    await send_flow_message(message.bot, message.chat.id, state, f"✅ Операция выполнена. Новый баланс: {await get_balance(target):.2f} ₽")
 
 async def retry_telegram_request(make_request, bot, method):
     # Temporary Telegram network failures should not immediately break user replies.
