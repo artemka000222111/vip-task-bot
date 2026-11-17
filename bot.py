@@ -217,6 +217,11 @@ async def init_database() -> None:
             )
         """)
         await conn.execute("""
+            INSERT INTO nobody_settings (key, value)
+            VALUES ('min_topup_amount', '1'), ('min_withdraw_amount', '100')
+            ON CONFLICT (key) DO NOTHING
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS nobody_transactions (
                 id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES nobody_users(telegram_id),
                 amount NUMERIC(12,2) NOT NULL, kind TEXT NOT NULL, description TEXT NOT NULL,
@@ -1160,7 +1165,7 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
             f"💸 Вывод средств\n\nКомиссия проекта: {project_percent:.0f}%"
             + (f"\nКомиссия рефереру: {partner_percent:.0f}%" if partner_percent else "")
             + "\nНа карту поступит 90% от суммы вывода. Комиссии начисляются после одобрения заявки.\n\n"
-            "Введи сумму от 100 ₽:",
+            f"Введи сумму от {await get_price('min_withdraw_amount'):.2f} ₽:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
             ])
@@ -1180,10 +1185,12 @@ async def withdraw_cancel(callback: CallbackQuery, state: FSMContext):
 async def withdraw_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        if amount < Decimal("100") or amount > Decimal("1000000"): raise InvalidOperation
+        minimum = await get_price("min_withdraw_amount")
+        if amount < minimum or amount > Decimal("1000000"): raise InvalidOperation
     except (InvalidOperation, ValueError):
+        minimum = await get_price("min_withdraw_amount")
         await message.answer(
-            "Введи сумму от 100 ₽.",
+            f"Введи сумму от {minimum:.2f} ₽.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
             ])
@@ -1340,10 +1347,12 @@ async def topup_start(callback: CallbackQuery, state: FSMContext):
 async def topup_amount(message: Message, state: FSMContext):
     try:
         amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        if amount <= 0 or amount > Decimal("1000000"):
+        minimum = await get_price("min_topup_amount")
+        if amount < minimum or amount > Decimal("1000000"):
             raise InvalidOperation
     except (InvalidOperation, ValueError):
-        await message.answer("Введи корректную сумму больше 0 ₽.")
+        minimum = await get_price("min_topup_amount")
+        await message.answer(f"Минимальная сумма пополнения — {minimum:.2f} ₽. Введи корректную сумму.")
         return
     try:
         await message.delete()
@@ -1959,12 +1968,17 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         async with db_pool.acquire() as conn:
             card_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='card_price'")
             reveal_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='reveal_price'")
+            min_topup_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='min_topup_amount'")
+            min_withdraw_value = await conn.fetchval("SELECT value FROM nobody_settings WHERE key='min_withdraw_amount'")
         card_label = f"{Decimal(card_value):.2f} ₽" if card_value is not None else "не задана"
         reveal_label = f"{Decimal(reveal_value):.2f} ₽" if reveal_value is not None else "не задана"
+        min_topup_label = f"{Decimal(min_topup_value or '1'):.2f} ₽"
+        min_withdraw_label = f"{Decimal(min_withdraw_value or '100'):.2f} ₽"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"❤️ Цена открытки: {card_label}", callback_data="price:card")],
             [InlineKeyboardButton(text=f"🔎 Цена раскрытия: {reveal_label}", callback_data="price:reveal")],
-
+            [InlineKeyboardButton(text=f"➕ Минимальное пополнение: {min_topup_label}", callback_data="price:min_topup")],
+            [InlineKeyboardButton(text=f"💸 Минимальный вывод: {min_withdraw_label}", callback_data="price:min_withdraw")],
         ])
         if callback.message:
             await callback.message.answer("💵 НАСТРОЙКА ЦЕН\n\nВыбери, какую цену изменить:", reply_markup=kb)
@@ -2203,13 +2217,23 @@ async def stats_earnings(callback: CallbackQuery):
             f"Траты за сегодня: {Decimal(spent_today):.2f} ₽"
         )
 
-@dp.callback_query(F.data.in_({"price:card", "price:reveal"}))
+@dp.callback_query(F.data.in_({"price:card", "price:reveal", "price:min_topup", "price:min_withdraw"}))
 async def admin_price_start(callback: CallbackQuery, state: FSMContext):
     if not await is_admin(callback.from_user.id):
         await callback.answer("Нет доступа.", show_alert=True)
         return
-    kind = {"price:card": "card_price", "price:reveal": "reveal_price"}[callback.data]
-    title = {"card_price": "открытки", "reveal_price": "раскрытия личности"}[kind]
+    kind = {
+        "price:card": "card_price",
+        "price:reveal": "reveal_price",
+        "price:min_topup": "min_topup_amount",
+        "price:min_withdraw": "min_withdraw_amount",
+    }[callback.data]
+    title = {
+        "card_price": "открытки",
+        "reveal_price": "раскрытия личности",
+        "min_topup_amount": "минимальную сумму пополнения",
+        "min_withdraw_amount": "минимальную сумму вывода",
+    }[kind]
     await state.clear()
     await state.update_data(price_kind=kind)
     await state.set_state(AdminFlow.price_value)
@@ -2233,7 +2257,7 @@ async def admin_price_save(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     key = data.get("price_kind")
-    if key not in ("card_price", "reveal_price"):
+    if key not in ("card_price", "reveal_price", "min_topup_amount", "min_withdraw_amount"):
         await state.clear()
         await message.answer("Не удалось определить тип цены. Открой настройки заново.")
         return
@@ -2243,9 +2267,13 @@ async def admin_price_save(message: Message, state: FSMContext):
             key, str(value)
         )
     await state.clear()
-    label = {"card_price": "открытки", "reveal_price": "раскрытия личности"}[key]
-    suffix = " ₽"
-    await message.answer(f"✅ Новое значение {label}: {value:.2f}{suffix}")
+    label = {
+        "card_price": "цена открытки",
+        "reveal_price": "цена раскрытия личности",
+        "min_topup_amount": "минимальное пополнение",
+        "min_withdraw_amount": "минимальный вывод",
+    }[key]
+    await message.answer(f"✅ Новое значение ({label}): {value:.2f} ₽")
 
 @dp.message(AdminFlow.balance_user)
 async def admin_balance_user(message: Message, state: FSMContext):
