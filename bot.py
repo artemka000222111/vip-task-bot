@@ -76,11 +76,6 @@ class WithdrawFlow(StatesGroup):
 class ReplyFlow(StatesGroup):
     text = State()
 
-class PartnerWithdrawFlow(StatesGroup):
-    amount = State()
-    phone = State()
-    bank = State()
-
 class SupportFlow(StatesGroup):
     new_text = State()
     user_reply = State()
@@ -324,8 +319,8 @@ async def init_database() -> None:
         """)
         await conn.execute("""
             INSERT INTO nobody_settings (key, value)
-            VALUES ('min_topup_amount', '1'), ('min_withdraw_amount', '100'),
-                   ('referral_bonus_enabled', 'true'), ('referral_bonus_amount', '1')
+            VALUES ('min_topup_amount', '1'), ('min_withdraw_amount', '10'),
+                   ('referral_bonus_enabled', 'true'), ('referral_bonus_amount', '2')
             ON CONFLICT (key) DO NOTHING
         """)
         await conn.execute("""
@@ -411,6 +406,39 @@ async def init_database() -> None:
                 reviewed_at TIMESTAMPTZ
             )
         """)
+    # One-time migration: transfer all currently available legacy partner earnings
+    # into the main balance. Negative/reserved ledger amounts are respected.
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            migrated = await conn.fetchval(
+                """INSERT INTO nobody_settings (key,value)
+                   VALUES ('main_balance_partner_migration_v1','done')
+                   ON CONFLICT (key) DO NOTHING RETURNING key"""
+            )
+            if migrated:
+                legacy_rows = await conn.fetch(
+                    """SELECT partner_id, SUM(amount) AS available
+                       FROM nobody_partner_ledger GROUP BY partner_id HAVING SUM(amount)>0"""
+                )
+                for legacy in legacy_rows:
+                    amount = Decimal(legacy["available"]).quantize(Decimal("0.01"))
+                    inserted = await conn.fetchval(
+                        """INSERT INTO nobody_transactions
+                           (user_id,amount,kind,description,ref)
+                           VALUES ($1,$2,'credit','Перенос старого партнёрского баланса на основной',$3)
+                           ON CONFLICT (ref) DO NOTHING RETURNING id""",
+                        legacy["partner_id"], amount,
+                        f"legacy-partner-balance-migration-v1:{legacy['partner_id']}"
+                    )
+                    if inserted:
+                        await conn.execute(
+                            "UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1",
+                            legacy["partner_id"], amount
+                        )
+            await conn.execute(
+                """INSERT INTO nobody_settings (key,value) VALUES ('min_withdraw_amount','10')
+                   ON CONFLICT (key) DO UPDATE SET value='10'"""
+            )
     log.info("VIP NOBODY database is ready")
 
 async def save_user(user) -> None:
@@ -435,6 +463,7 @@ async def get_partner_balance(user_id: int, conn=None) -> Decimal:
 
 
 async def add_partner_commission(conn, buyer_id: int, purchase_amount: Decimal, ref: str, description: str, percent: Decimal = Decimal("10")):
+    """Credit referral purchase commission directly to the referrer's main balance."""
     referrer_id = await conn.fetchval("SELECT referred_by FROM nobody_users WHERE telegram_id=$1", buyer_id)
     if not referrer_id or referrer_id == buyer_id:
         return None
@@ -442,13 +471,15 @@ async def add_partner_commission(conn, buyer_id: int, purchase_amount: Decimal, 
     if commission <= 0:
         return None
     inserted = await conn.fetchval(
-        """INSERT INTO nobody_partner_ledger
-           (partner_id,source_user_id,amount,kind,description,ref)
-           VALUES ($1,$2,$3,'commission',$4,$5)
+        """INSERT INTO nobody_transactions (user_id,amount,kind,description,ref)
+           VALUES ($1,$2,'credit',$3,$4)
            ON CONFLICT (ref) DO NOTHING RETURNING id""",
-        referrer_id, buyer_id, commission, description, ref
+        referrer_id, commission, description, ref
     )
-    return (referrer_id, commission) if inserted else None
+    if not inserted:
+        return None
+    await conn.execute("UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1", referrer_id, commission)
+    return (referrer_id, commission)
 
 
 class ActivityMiddleware(BaseMiddleware):
@@ -556,14 +587,18 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                                 "SELECT value FROM nobody_settings WHERE key='referral_bonus_amount'"
                             ) or "1")
                             inserted = await conn.fetchval(
-                                """INSERT INTO nobody_partner_ledger
-                                   (partner_id,source_user_id,amount,kind,description,ref)
-                                   VALUES ($1,$2,$3,'referral_bonus',$4,$5)
+                                """INSERT INTO nobody_transactions
+                                   (user_id,amount,kind,description,ref)
+                                   VALUES ($1,$2,'credit',$3,$4)
                                    ON CONFLICT (ref) DO NOTHING RETURNING id""",
-                                linked_referrer, message.from_user.id, bonus_amount,
+                                linked_referrer, bonus_amount,
                                 "Бонус за нового реферала", f"referral-bonus:{message.from_user.id}"
                             )
                             if inserted:
+                                await conn.execute(
+                                    "UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1",
+                                    linked_referrer, bonus_amount
+                                )
                                 referral_bonus = (linked_referrer, bonus_amount)
                 else:
                     await conn.execute("UPDATE nobody_users SET referral_locked=TRUE WHERE telegram_id=$1", message.from_user.id)
@@ -573,10 +608,10 @@ async def start(message: Message, state: FSMContext, bot: Bot):
                 await bot.send_message(
                     referrer_id,
                     "🎉 У вас новый реферал!\n\n"
-                    f"На ваш партнёрский баланс зачислено {credited_amount:g} ₽.\n\n"
+                    f"На ваш основной баланс зачислено {credited_amount:g} ₽.\n\n"
                     "Также вы получаете:\n"
                     "💌 10% с каждой его покупки\n"
-                    "💸 5% с его вывода после одобрения заявки."
+                    "💸 5% с его вывода после одобрения заявки — на твой основной баланс."
                 )
             except Exception:
                 log.exception("Could not notify referrer %s about new referral", referrer_id)
@@ -1109,12 +1144,11 @@ async def partner_cabinet(message: Message, bot: Bot, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="partner:analytics")],
         [InlineKeyboardButton(text="📖 Как это работает?", callback_data="partner:howto")],
-        [InlineKeyboardButton(text="📤 Вывести заработок", callback_data="partner:withdraw")],
         [InlineKeyboardButton(text="📨 Поделиться ссылкой", callback_data="partner:share")],
     ])
     await send_ui_message(
         bot, message.chat.id, state,
-        "💼 МОЙ ЗАРАБОТОК\n\n" + signup_bonus_text,
+        "💼 МОЙ ЗАРАБОТОК\n\n" + signup_bonus_text + "\n\n💰 Все начисления поступают на основной баланс. Вывод — в разделе «Баланс» от 10 ₽.",
         reply_markup=kb
     )
 
@@ -1131,8 +1165,13 @@ async def partner_analytics(callback: CallbackQuery):
             "AND last_active_at >= NOW()-INTERVAL '30 days'", uid
         )
         earned = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger "
-            "WHERE partner_id=$1 AND kind IN ('referral_bonus','commission','withdrawal_commission')", uid
+            """SELECT COALESCE(SUM(amount),0) FROM nobody_transactions
+               WHERE user_id=$1 AND amount>0 AND (
+                 description='Бонус за нового реферала'
+                 OR description LIKE 'Комиссия за покупку%'
+                 OR description LIKE 'Комиссия за раскрытие%'
+                 OR description LIKE 'Комиссия за одобренный вывод%'
+               )""", uid
         )
     await callback.answer()
     if callback.message:
@@ -1165,9 +1204,9 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             if bonus_enabled else ""
         )
         signup_bonus_footer = (
-            "Бонус за реферала и начисления за покупки поступают сразу, за вывод — после одобрения заявки."
+            "Бонусы и начисления поступают на основной баланс. 5% с вывода реферала начисляются после одобрения заявки."
             if bonus_enabled else
-            "Начисления за покупки поступают сразу, за одобренный вывод — после подтверждения заявки."
+            "Все начисления поступают на основной баланс. 5% с вывода реферала — после одобрения заявки."
         )
         await replace_callback_message(callback, 
             "📖 КАК ЭТО РАБОТАЕТ?\n\n"
@@ -1177,7 +1216,7 @@ async def partner_howto(callback: CallbackQuery, bot: Bot):
             + signup_bonus_text +
             "💌 Покупка открытки — 10%\n"
             "🔎 Раскрытие личности — 10%\n"
-            "💸 Одобренный вывод баланса — 5%\n\n"
+            "💸 Одобренный вывод реферала — 5% на основной баланс\n\n"
             + signup_bonus_footer,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share_url)]
@@ -1197,166 +1236,6 @@ async def partner_share(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="📨 Поделиться", url=f"https://t.me/share/url?url={link}")],
             ])
         )
-
-
-@dp.callback_query(F.data == "partner:withdraw")
-async def partner_withdraw_start(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    balance = await get_partner_balance(callback.from_user.id)
-    if balance < Decimal("100"):
-        await callback.answer("Для вывода нужно накопить минимум 100 ₽.", show_alert=True)
-        return
-    await state.set_state(PartnerWithdrawFlow.amount)
-    await callback.answer()
-    if callback.message:
-        await replace_callback_message(callback, 
-            "📤 ВЫВОД ПАРТНЁРСКОГО ЗАРАБОТКА\n\n"
-            "Вывод доступен только через СБП.\n"
-            "Понадобятся номер телефона, привязанный к СБП, и название банка.\n\n"
-            f"Доступно: {balance:.2f} ₽\n"
-            "Введи сумму для вывода (минимум 100 ₽):",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="❌ Отказаться", callback_data="partner:cancel")]
-            ])
-        )
-
-
-@dp.callback_query(F.data == "partner:cancel")
-async def partner_withdraw_cancel(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    if callback.message:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    await callback.answer("Вывод отменён.")
-
-
-@dp.message(PartnerWithdrawFlow.amount)
-async def partner_withdraw_amount(message: Message, state: FSMContext):
-    try:
-        amount = Decimal((message.text or "").replace(",", ".").strip()).quantize(Decimal("0.01"))
-        available = await get_partner_balance(message.from_user.id)
-        if amount < Decimal("100") or amount > available:
-            raise InvalidOperation
-    except (InvalidOperation, ValueError):
-        available = await get_partner_balance(message.from_user.id)
-        await send_flow_message(message.bot, message.chat.id, state, f"Введи сумму от 100 ₽, не больше доступных {available:.2f} ₽.")
-        return
-    await state.update_data(partner_amount=str(amount))
-    await state.set_state(PartnerWithdrawFlow.phone)
-    await send_flow_message(message.bot, message.chat.id, state, 
-        "📱 Введи номер телефона, который привязан к СБП.\n"
-        "На этот номер будет отправлен перевод:"
-    )
-
-
-@dp.message(PartnerWithdrawFlow.phone)
-async def partner_withdraw_phone(message: Message, state: FSMContext):
-    phone = (message.text or "").strip()
-    digits = "".join(ch for ch in phone if ch.isdigit())
-    if len(digits) < 10 or len(digits) > 15:
-        await send_flow_message(message.bot, message.chat.id, state, "Проверь номер телефона и введи ещё раз.")
-        return
-    await state.update_data(partner_phone=phone)
-    await state.set_state(PartnerWithdrawFlow.bank)
-    await send_flow_message(message.bot, message.chat.id, state, 
-        "🏦 Укажи название банка, в котором подключён СБП:"
-    )
-
-
-@dp.message(PartnerWithdrawFlow.bank)
-async def partner_withdraw_bank(message: Message, state: FSMContext, bot: Bot):
-    bank = (message.text or "").strip()
-    if len(bank) < 2 or len(bank) > 80:
-        await send_flow_message(message.bot, message.chat.id, state, "Введи название банка.")
-        return
-    data = await state.get_data()
-    uid = message.from_user.id
-    amount = Decimal(data["partner_amount"])
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock($1)", uid)
-            available = await conn.fetchval(
-                "SELECT COALESCE(SUM(amount),0) FROM nobody_partner_ledger WHERE partner_id=$1", uid
-            )
-            if Decimal(available or 0) < amount:
-                await state.clear()
-                await send_flow_message(message.bot, message.chat.id, state, "Недостаточно средств для вывода.")
-                return
-            wid = await conn.fetchval(
-                "INSERT INTO nobody_partner_withdrawals (user_id,amount,phone,bank) VALUES ($1,$2,$3,$4) RETURNING id",
-                uid, amount, data["partner_phone"], bank
-            )
-            await conn.execute(
-                """INSERT INTO nobody_partner_ledger (partner_id,amount,kind,description,ref)
-                   VALUES ($1,$2,'withdrawal_reserve',$3,$4)""",
-                uid, -amount, f"Резерв партнёрского вывода №{wid}", f"partner-withdraw:{wid}:reserve"
-            )
-    await state.clear()
-    await send_flow_message(message.bot, message.chat.id, state, f"✅ Заявка №{wid} на вывод партнёрского заработка отправлена. Сумма: {amount:.2f} ₽.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Выплачено", callback_data=f"partner:approve:{wid}"),
-        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"partner:reject:{wid}")
-    ]])
-    await bot.send_message(
-        ADMIN_ID,
-        f"📤 ЗАЯВКА НА ВЫВОД ПАРТНЁРСКОГО ЗАРАБОТКА №{wid}\n\n"
-        f"Сумма: {amount:.2f} ₽\n"
-        f"Способ: СБП\n"
-        f"Телефон: {data['partner_phone']}\n"
-        f"Банк: {bank}\n"
-        f"Telegram ID: {uid}",
-        reply_markup=kb
-    )
-
-
-@dp.callback_query(F.data.startswith("partner:approve:"))
-async def partner_withdraw_approve(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
-    wid = int(callback.data.rsplit(":", 1)[1])
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """UPDATE nobody_partner_withdrawals SET status='approved',reviewed_at=NOW()
-               WHERE id=$1 AND status='pending' RETURNING user_id,amount""", wid
-        )
-    if not row:
-        await callback.answer("Заявка уже обработана.", show_alert=True)
-        return
-    await callback.answer("Отмечено как выплачено.")
-    if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.bot.send_message(row["user_id"], f"✅ Партнёрский вывод №{wid} одобрен. Выплачено {Decimal(row['amount']):.2f} ₽.")
-
-
-@dp.callback_query(F.data.startswith("partner:reject:"))
-async def partner_withdraw_reject(callback: CallbackQuery):
-    if not await is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа.", show_alert=True)
-        return
-    wid = int(callback.data.rsplit(":", 1)[1])
-    async with db_pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """UPDATE nobody_partner_withdrawals SET status='rejected',reviewed_at=NOW()
-                   WHERE id=$1 AND status='pending' RETURNING user_id,amount""", wid
-            )
-            if row:
-                await conn.execute(
-                    """INSERT INTO nobody_partner_ledger (partner_id,amount,kind,description,ref)
-                       VALUES ($1,$2,'withdrawal_refund',$3,$4) ON CONFLICT (ref) DO NOTHING""",
-                    row["user_id"], row["amount"], f"Возврат отклонённого партнёрского вывода №{wid}",
-                    f"partner-withdraw:{wid}:refund"
-                )
-    if not row:
-        await callback.answer("Заявка уже обработана.", show_alert=True)
-        return
-    await callback.answer("Средства возвращены.")
-    if callback.message:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.bot.send_message(row["user_id"], f"❌ Партнёрский вывод №{wid} отклонён. {Decimal(row['amount']):.2f} ₽ возвращены.")
 
 
 @dp.message(F.text == "💰 Баланс")
@@ -1381,7 +1260,7 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
         await replace_callback_message(callback, 
             f"💸 Вывод средств\n\nКомиссия проекта: {project_percent:.0f}%"
             + (f"\nКомиссия рефереру: {partner_percent:.0f}%" if partner_percent else "")
-            + "\nНа карту поступит 90% от суммы вывода. Комиссии начисляются после одобрения заявки.\n\n"
+            + "\nКомиссия: 10% без реферала или 5% проекту + 5% рефереру, если пользователь приглашён.\n\n"
             f"Введи сумму от {await get_price('min_withdraw_amount'):.2f} ₽:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="❌ Отказаться", callback_data="withdraw:cancel")]
@@ -1504,15 +1383,20 @@ async def withdraw_approve(callback: CallbackQuery):
                 wid
             )
             if row and row["referrer_id"] and Decimal(row["referrer_commission"]) > 0:
-                await conn.execute(
-                    """INSERT INTO nobody_partner_ledger
-                       (partner_id,source_user_id,amount,kind,description,ref)
-                       VALUES ($1,$2,$3,'withdrawal_commission',$4,$5)
-                       ON CONFLICT (ref) DO NOTHING""",
-                    row["referrer_id"], row["user_id"], row["referrer_commission"],
+                inserted = await conn.fetchval(
+                    """INSERT INTO nobody_transactions
+                       (user_id,amount,kind,description,ref)
+                       VALUES ($1,$2,'credit',$3,$4)
+                       ON CONFLICT (ref) DO NOTHING RETURNING id""",
+                    row["referrer_id"], row["referrer_commission"],
                     f"Комиссия за одобренный вывод приглашённого пользователя №{wid}",
                     f"withdraw-referral:{wid}"
                 )
+                if inserted:
+                    await conn.execute(
+                        "UPDATE nobody_users SET balance=balance+$2 WHERE telegram_id=$1",
+                        row["referrer_id"], row["referrer_commission"]
+                    )
     if not row:
         await callback.answer("Заявка уже обработана.", show_alert=True); return
     await callback.answer("Отмечено как выплачено.")
@@ -1522,7 +1406,7 @@ async def withdraw_approve(callback: CallbackQuery):
         try:
             await callback.bot.send_message(
                 row["referrer_id"],
-                f"💰 Вам начислено {Decimal(row['referrer_commission']):.2f} ₽ — 5% с одобренного вывода приглашённого пользователя."
+                f"💰 На ваш основной баланс начислено {Decimal(row['referrer_commission']):.2f} ₽ — 5% с одобренного вывода реферала."
             )
         except Exception:
             log.exception("Could not notify referrer for withdrawal %s", wid)
