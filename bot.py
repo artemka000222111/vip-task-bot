@@ -2085,6 +2085,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="🔄 Вернуть кнопки всем", callback_data="admin:restore_menu")],
     ])
     await send_ui_message(message.bot, message.chat.id, state, "🛠 АДМИН-ПАНЕЛЬ VIP NOBODY", reply_markup=kb)
 
@@ -2215,12 +2216,38 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdminFlow.message_view_user)
         if callback.message:
             await replace_callback_message(callback, "Введи @username пользователя, чтобы посмотреть последние 10 сообщений, которые ему отправляли.")
+    elif action == "restore_menu":
+        async with db_pool.acquire() as conn:
+            user_ids = await conn.fetch("SELECT telegram_id FROM nobody_users ORDER BY telegram_id")
+        if callback.message:
+            await replace_callback_message(callback, "⏳ Возвращаю главное меню всем пользователям...")
+        sent_count = 0
+        failed_count = 0
+        for row in user_ids:
+            uid = row["telegram_id"]
+            try:
+                await callback.bot.send_message(
+                    chat_id=uid,
+                    text="👋 Главное меню снова доступно. Выбирай нужный раздел кнопками ниже.",
+                    reply_markup=main_keyboard(is_admin=(uid == ADMIN_ID))
+                )
+                sent_count += 1
+            except Exception as exc:
+                failed_count += 1
+                log.warning("Menu restore failed for user %s: %s", uid, exc)
+            await asyncio.sleep(0.05)
+        if callback.message:
+            await callback.message.answer(
+                "✅ ВОССТАНОВЛЕНИЕ ЗАВЕРШЕНО\\n\\n"
+                f"📨 Меню отправлено: {sent_count}\\n"
+                f"⚠️ Не удалось доставить: {failed_count}"
+            )
     elif action == "broadcast":
         await state.clear()
         await state.set_state(AdminFlow.broadcast_text)
         if callback.message:
-            await replace_callback_message(callback, 
-                "📢 РАССЫЛКА\n\nОтправь текст, который нужно разослать всем пользователям бота.\n"
+            await replace_callback_message(callback,
+                "📢 РАССЫЛКА\\n\\nОтправь текст, который нужно разослать всем пользователям бота.\\n"
                 "Можно использовать эмодзи. Для отмены открой админ-панель."
             )
 
@@ -2400,7 +2427,7 @@ async def admin_broadcast_action(callback: CallbackQuery, state: FSMContext, bot
     failed_count = 0
     for row in user_ids:
         try:
-            await bot.send_message(chat_id=row["telegram_id"], text=body)
+            await bot.send_message(chat_id=row["telegram_id"], text=body, reply_markup=main_keyboard(is_admin=(row["telegram_id"] == ADMIN_ID)))
             sent_count += 1
         except Exception as exc:
             failed_count += 1
