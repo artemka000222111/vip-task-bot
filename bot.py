@@ -2144,7 +2144,7 @@ async def admin_panel(message: Message, state: FSMContext):
         [InlineKeyboardButton(text="💵 Изменить цены", callback_data="admin:prices")],
         [InlineKeyboardButton(text="👥 Рефералы", callback_data="admin:referrals")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="🏆 Топ 10 активных", callback_data="admin:top_active")],
+        [InlineKeyboardButton(text="🏆 Топ 100 активных", callback_data="admin:top_active:0")],
         [InlineKeyboardButton(text="👁 Просмотр", callback_data="admin:view_messages")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
         [InlineKeyboardButton(text="🔄 Вернуть кнопки всем", callback_data="admin:restore_menu")],
@@ -2256,23 +2256,46 @@ async def admin_actions(callback: CallbackQuery, state: FSMContext):
             )
 
     elif action == "top_active":
+        page_size = 10
+        max_users = 100
+        try:
+            parts = callback.data.split(":")
+            page = max(0, int(parts[2])) if len(parts) > 2 else 0
+        except (TypeError, ValueError):
+            page = 0
         async with db_pool.acquire() as conn:
+            total_users = await conn.fetchval(
+                "SELECT COUNT(*) FROM nobody_users WHERE last_active_at IS NOT NULL"
+            )
+            total_pages = min(10, max(1, (min(int(total_users or 0), max_users) + page_size - 1) // page_size))
+            page = min(page, total_pages - 1)
             users = await conn.fetch(
                 "SELECT username, first_name, last_active_at, activity_count "
                 "FROM nobody_users WHERE last_active_at IS NOT NULL "
-                "ORDER BY activity_count DESC, last_active_at DESC LIMIT 10"
+                "ORDER BY activity_count DESC, last_active_at DESC "
+                "LIMIT $1 OFFSET $2",
+                page_size, page * page_size
             )
         if callback.message:
             if not users:
                 await replace_callback_message(callback, "Пока нет активных пользователей.")
             else:
-                lines = ["🏆 ТОП 10 АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ\n"]
-                for index, user in enumerate(users, 1):
+                start_rank = page * page_size + 1
+                end_rank = start_rank + len(users) - 1
+                lines = [f"🏆 ТОП 100 АКТИВНЫХ ПОЛЬЗОВАТЕЛЕЙ\nПоказаны места {start_rank}–{end_rank} из {min(int(total_users or 0), max_users)}\n"]
+                for index, user in enumerate(users, start_rank):
                     username = f"@{user['username']}" if user["username"] else "username не указан"
                     name = user["first_name"] or "Без имени"
                     active_at = user["last_active_at"].astimezone(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y %H:%M")
                     lines.append(f"{index}. {username} — {name}\n   Действий: {user['activity_count']} · Последняя активность: {active_at}")
-                await replace_callback_message(callback, "\n".join(lines))
+                nav_buttons = []
+                if page > 0:
+                    nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin:top_active:{page - 1}"))
+                nav_buttons.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="admin:top_active:0"))
+                if page < total_pages - 1:
+                    nav_buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin:top_active:{page + 1}"))
+                kb = InlineKeyboardMarkup(inline_keyboard=[nav_buttons])
+                await replace_callback_message(callback, "\n".join(lines), reply_markup=kb)
     elif action == "view_messages":
         await state.clear()
         await state.set_state(AdminFlow.message_view_user)
